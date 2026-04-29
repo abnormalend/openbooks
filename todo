@@ -8,3 +8,9 @@ Future:
     after websocket disconnect.
 - Send download progress updates to the browser like we show for the CLI
 - Responsive layout
+- Refresh frontend build toolchain (upstream PR evan-buss/openbooks#181):
+    bump vite 3.1 -> 5.4, @vitejs/plugin-react 2 -> 4, rollup 2 -> 4.
+    Patches a rollup DOM-Clobbering CVE and a vite path-traversal CVE.
+    Major-version jumps; smoke-test `task dev:client` and a production
+    `npm run build` before merging. Consider bundling with a Mantine
+    refresh rather than landing the deps in isolation.
