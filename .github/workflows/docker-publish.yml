@@ -9,6 +9,9 @@ on:
       - "docs/**"
     tags:
       - "v*.*.*"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
 
 env:
   REGISTRY: ghcr.io
@@ -50,9 +53,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # type=ref,event=pr emits "pr-N" only on pull_request triggers,
+          # so a PR build pushes ghcr.io/.../openbooks:pr-42 (and a sha
+          # tag) without touching :latest. master pushes still own :latest.
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
+            type=ref,event=pr
             type=sha
 
       - name: Build and push
