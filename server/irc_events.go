@@ -28,10 +28,11 @@ func (server *server) NewIrcEventHandler(client *Client) core.EventHandler {
 // events for the log panel. Skips high-volume protocol noise that has
 // no user-facing value (PING keepalive and 353/366 NAMES traffic).
 //
-// The send is non-blocking: if the per-client send channel is full
-// (e.g. because of a flood of NOTICE traffic during a slow render),
-// the log line is dropped rather than blocking the IRC reader, which
-// would also stall structured events like DOWNLOAD.
+// The send MUST be non-blocking: core.StartReader invokes the Message
+// handler synchronously on the IRC reader goroutine (unlike all other
+// handlers which it dispatches via `go invoke(...)`), so a blocking
+// send here would stall the reader and starve structured events like
+// DOWNLOAD. On a full per-client send channel we drop the log line.
 func (c *Client) ircLogHandler() core.HandlerFunc {
 	return func(text string) {
 		if isProtocolNoise(text) {

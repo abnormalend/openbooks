@@ -2,6 +2,11 @@ import { Box, Center, Group, Text, useMantineTheme } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { useAppSelector } from "../../state/store";
 
+// Pixel slack for "is the user pinned at the bottom?" - covers sub-pixel
+// rounding on HiDPI displays where scrollHeight - scrollTop - clientHeight
+// can be a fraction even when the user is visually at the bottom.
+const SCROLL_PIN_TOLERANCE_PX = 4;
+
 const formatTime = (ts: number): string =>
   new Date(ts).toLocaleTimeString("en-US", { hour12: false });
 
@@ -24,7 +29,9 @@ export default function IrcLogPanel() {
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 4;
+    const atBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight <
+      SCROLL_PIN_TOLERANCE_PX;
     setStickToBottom(atBottom);
   };
 
@@ -85,8 +92,12 @@ export default function IrcLogPanel() {
           </Center>
         ) : (
           entries.map((e, i) => (
+            // ircLogSlice.appendEntry caps at MAX_ENTRIES and shifts
+            // older entries off the front, so a bare index would alias
+            // across the cap boundary. Combine with timestamp to keep
+            // React reconciliation stable when the buffer rolls.
             <div
-              key={i}
+              key={`${e.timestamp}-${i}`}
               style={{
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-all",
