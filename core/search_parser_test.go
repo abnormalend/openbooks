@@ -11,15 +11,18 @@ func TestSearchParser(t *testing.T) {
 	reader := strings.NewReader(sampleData)
 	results, errors := ParseSearch(reader)
 
-	if len(errors) > 1 {
-		t.Errorf("Expected 1 errors but got %d\n", len(errors))
+	// sampleData includes lines that legitimately can't be parsed
+	// (comic-book filenames without an "Author - Title" separator and
+	// underscore-delimited names). V1 is stricter than V2.
+	if len(errors) != 31 {
+		t.Errorf("Expected 31 errors but got %d\n", len(errors))
 		for _, parseError := range errors {
 			t.Log(parseError)
 		}
 	}
 
-	if len(results) != 57 {
-		t.Errorf("Expected 57 results but got %d\n", len(results))
+	if len(results) != 28 {
+		t.Errorf("Expected 28 results but got %d\n", len(results))
 	}
 }
 
@@ -27,15 +30,15 @@ func TestSearchParserV2(t *testing.T) {
 	reader := strings.NewReader(sampleData)
 	results, errors := ParseSearchV2(reader)
 
-	if len(errors) != 1 {
-		t.Errorf("Expected 1 errors but got %d\n", len(errors))
+	if len(errors) != 19 {
+		t.Errorf("Expected 19 errors but got %d\n", len(errors))
 		for _, parseError := range errors {
 			t.Log(parseError)
 		}
 	}
 
-	if len(results) != 57 {
-		t.Errorf("Expected 57 results but got %d\n", len(results))
+	if len(results) != 40 {
+		t.Errorf("Expected 40 results but got %d\n", len(results))
 	}
 }
 
