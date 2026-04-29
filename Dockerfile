@@ -1,11 +1,11 @@
-FROM node:16 as web
+FROM node:16 AS web
 WORKDIR /web
 COPY . .
 WORKDIR /web/server/app/
 RUN npm install
 RUN npm run build
 
-FROM golang as build
+FROM golang AS build
 WORKDIR /go/src/
 COPY . .
 COPY --from=web /web/ .
@@ -16,7 +16,7 @@ RUN go install -v ./...
 WORKDIR /go/src/cmd/openbooks/
 RUN go build
 
-FROM gcr.io/distroless/static as app
+FROM gcr.io/distroless/static AS app
 WORKDIR /app
 COPY --from=build /go/src/cmd/openbooks/openbooks .
 
