@@ -77,6 +77,23 @@ Double clicking the executable will open the UI in your browser. In the future i
   go run . server --server localhost --log
   ```
 
+### Run the tests
+
+- Go unit tests (with race detector and coverage):
+  ```bash
+  go test -race -cover ./...
+  ```
+- Go integration tests (build-tagged, spins up in-process IRC/DCC servers):
+  ```bash
+  go test -race -tags=integration ./...
+  ```
+- Frontend tests (Vitest):
+  ```bash
+  cd server/app
+  npm test          # watch mode
+  npm run test:ci   # single run with coverage
+  ```
+
 ### Desktop App
 
 Compile OpenBooks with experimental webview support:

@@ -33,7 +33,9 @@ React + TypeScript + Vite single-page app that provides the OpenBooks browser UI
 - `npm run prettier` formats `src/**` per `.prettierrc`. Run before committing.
 
 ### Testing Requirements
-- No JS test runner is configured. Manual verification: `task dev:client` (Vite) + `task dev:server` (Go server pointed at the mock).
+- `npm test` runs Vitest in watch mode; `npm run test:ci` runs once with v8 coverage.
+- Test files live under `src/state/__tests__/` and cover the Redux slices, the `state/util.ts` URL helpers, and a Go-vs-TS enum drift check that parses `server/messages.go` at test time.
+- Manual verification of the rendered UI: `task dev:client` (Vite) + `task dev:server` (Go server pointed at the mock).
 
 ## Dependencies
 
