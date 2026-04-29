@@ -50,8 +50,10 @@ OpenBooks is a Go application that downloads eBooks from `irc.irchighway.net` qu
 - Two version constants live in `cmd/openbooks/main.go`: `version` (binary version, matches GitHub releases) and `ircVersion` (the version string reported via CTCP — change only when IRC admins require it).
 
 ### Testing Requirements
-- Go tests exist in `core/` (`*_test.go`) and `dcc/`. Run them with `go test ./...`.
-- For end-to-end work, prefer the mock server (`task dev:mock`) over connecting to the real `irc.irchighway.net` to avoid spamming the public service.
+- `go test -race -cover ./...` — unit tests across all Go packages.
+- `go test -race -tags=integration ./...` — integration suite under `tests/` that spins up in-process IRC + DCC servers.
+- `cd server/app && npm run test:ci` — Vitest suite for Redux slices, util helpers, and the cross-language `MessageType` enum drift catcher.
+- For manual end-to-end work, prefer the mock server (`task dev:mock`) over connecting to the real `irc.irchighway.net` to avoid spamming the public service.
 
 ### Common Patterns
 - Cobra commands are wired up in `cmd/openbooks/{cli,server}.go` via `init()` calling `desktopCmd.AddCommand(...)`.
