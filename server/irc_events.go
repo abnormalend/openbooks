@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/evan-buss/openbooks/core"
 )
@@ -19,7 +20,49 @@ func (server *server) NewIrcEventHandler(client *Client) core.EventHandler {
 	handler[core.Ping] = client.pingHandler
 	handler[core.ServerList] = client.userListHandler(server.repository)
 	handler[core.Version] = client.versionHandler(server.config.UserAgent)
+	handler[core.Message] = client.ircLogHandler()
 	return handler
+}
+
+// ircLogHandler forwards raw IRC lines to the browser as IRC_MESSAGE
+// events for the log panel. Skips high-volume protocol noise that has
+// no user-facing value (PING keepalive and 353/366 NAMES traffic).
+//
+// The send is non-blocking: if the per-client send channel is full
+// (e.g. because of a flood of NOTICE traffic during a slow render),
+// the log line is dropped rather than blocking the IRC reader, which
+// would also stall structured events like DOWNLOAD.
+func (c *Client) ircLogHandler() core.HandlerFunc {
+	return func(text string) {
+		if isProtocolNoise(text) {
+			return
+		}
+		select {
+		case c.send <- newIrcLogResponse(text):
+		default:
+			// Channel full; drop rather than block.
+		}
+	}
+}
+
+// isProtocolNoise reports whether a raw IRC line is a command we filter
+// from the user-facing log: server PING keepalive and the 353/366 NAMES
+// list dump.
+func isProtocolNoise(text string) bool {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return false
+	}
+	cmd := fields[0]
+	// Skip optional ":nick!user@host" prefix.
+	if strings.HasPrefix(cmd, ":") && len(fields) >= 2 {
+		cmd = fields[1]
+	}
+	switch cmd {
+	case "PING", "353", "366":
+		return true
+	}
+	return false
 }
 
 // searchResultHandler downloads from DCC server, parses data, and sends data to client

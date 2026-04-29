@@ -13,11 +13,12 @@ func _() {
 	_ = x[SEARCH-2]
 	_ = x[DOWNLOAD-3]
 	_ = x[RATELIMIT-4]
+	_ = x[IRC_MESSAGE-5]
 }
 
-const _MessageType_name = "STATUSCONNECTSEARCHDOWNLOADRATELIMIT"
+const _MessageType_name = "STATUSCONNECTSEARCHDOWNLOADRATELIMITIRC_MESSAGE"
 
-var _MessageType_index = [...]uint8{0, 6, 13, 19, 27, 36}
+var _MessageType_index = [...]uint8{0, 6, 13, 19, 27, 36, 47}
 
 func (i MessageType) String() string {
 	if i < 0 || i >= MessageType(len(_MessageType_index)-1) {
