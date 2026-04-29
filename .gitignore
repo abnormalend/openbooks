@@ -8,6 +8,7 @@ openbooks
 .task/
 docs/venv/
 docs/site/
+.omc/
 # end persist
 
 
