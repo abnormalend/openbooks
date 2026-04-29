@@ -10,7 +10,8 @@ export enum MessageType {
   CONNECT,
   SEARCH,
   DOWNLOAD,
-  RATELIMIT
+  RATELIMIT,
+  IRC_MESSAGE
 }
 
 // Notification is used to show a UI toast notification the the user.
@@ -55,4 +56,14 @@ export interface BookDetail {
 export interface ParseError {
   error: string;
   line: string;
+}
+
+// IrcLogResponse carries a single raw IRC line for the log panel. The
+// frontend appends it to ircLogSlice without raising a notification toast,
+// so this shape intentionally does not extend Response - no
+// appearance/title/detail fields would be useful.
+export interface IrcLogResponse {
+  type: MessageType;
+  line: string;
+  timestamp: number;
 }

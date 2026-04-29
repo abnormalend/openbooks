@@ -5,7 +5,8 @@ import stateReducer, {
   setUsername,
   addInFlightDownload,
   removeInFlightDownload,
-  toggleSidebar
+  toggleSidebar,
+  toggleLogPanel
 } from "../stateSlice";
 
 describe("stateSlice", () => {
@@ -20,6 +21,15 @@ describe("stateSlice", () => {
     expect(state.isSidebarOpen).toBe(false);
     state = stateReducer(state, toggleSidebar());
     expect(state.isSidebarOpen).toBe(true);
+  });
+
+  it("toggleLogPanel flips isLogOpen", () => {
+    let state = stateReducer(undefined, { type: "@@INIT" });
+    expect(state.isLogOpen).toBe(true);
+    state = stateReducer(state, toggleLogPanel());
+    expect(state.isLogOpen).toBe(false);
+    state = stateReducer(state, toggleLogPanel());
+    expect(state.isLogOpen).toBe(true);
   });
 
   it("setConnectionState sets isConnected", () => {

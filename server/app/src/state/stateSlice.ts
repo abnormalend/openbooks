@@ -11,6 +11,7 @@ import { AppDispatch, RootState } from "./store";
 interface AppState {
   isConnected: boolean;
   isSidebarOpen: boolean;
+  isLogOpen: boolean;
   activeItem: HistoryItem | null;
   username?: string;
   inFlightDownloads: string[];
@@ -27,6 +28,7 @@ const loadActive = (): HistoryItem | null => {
 const initialState: AppState = {
   isConnected: false,
   isSidebarOpen: true,
+  isLogOpen: true,
   activeItem: loadActive(),
   username: undefined,
   inFlightDownloads: []
@@ -53,6 +55,9 @@ const stateSlice = createSlice({
     },
     toggleSidebar(state) {
       state.isSidebarOpen = !state.isSidebarOpen;
+    },
+    toggleLogPanel(state) {
+      state.isLogOpen = !state.isLogOpen;
     }
   }
 });
@@ -126,7 +131,8 @@ export const {
   setUsername,
   addInFlightDownload,
   removeInFlightDownload,
-  toggleSidebar
+  toggleSidebar,
+  toggleLogPanel
 } = stateSlice.actions;
 
 export { stateSlice, sendMessage, sendDownload, sendSearch, setSearchResults };

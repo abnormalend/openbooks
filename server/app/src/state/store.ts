@@ -5,6 +5,7 @@ import throttle from "lodash/throttle";
 import { TypedUseSelectorHook, useDispatch, useSelector } from "react-redux";
 import { openbooksApi } from "./api";
 import historyReducer from "./historySlice";
+import ircLogReducer from "./ircLogSlice";
 import notificationReducer from "./notificationSlice";
 import { websocketConn } from "./socketMiddleware";
 import stateReducer from "./stateSlice";
@@ -16,6 +17,7 @@ export const store = configureStore({
   reducer: {
     state: stateReducer,
     history: historyReducer,
+    ircLog: ircLogReducer,
     notifications: notificationReducer,
     [openbooksApi.reducerPath]: openbooksApi.reducer
   },
