@@ -1,5 +1,6 @@
 import {
   ActionIcon,
+  Box,
   Button,
   Center,
   createStyles,
@@ -13,6 +14,7 @@ import {
 import { MagnifyingGlass, Sidebar, Warning } from "phosphor-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import image from "../assets/reading.svg";
+import IrcLogPanel from "../components/log/IrcLogPanel";
 import BookTable from "../components/tables/BookTable";
 import ErrorTable from "../components/tables/ErrorTable";
 import { MessageType } from "../state/messages";
@@ -60,6 +62,7 @@ export default function SearchPage() {
   const dispatch = useAppDispatch();
   const activeItem = useAppSelector((store) => store.state.activeItem);
   const opened = useAppSelector((store) => store.state.isSidebarOpen);
+  const isLogOpen = useAppSelector((store) => store.state.isLogOpen);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [showErrors, setShowErrors] = useState(false);
@@ -108,11 +111,36 @@ export default function SearchPage() {
     [activeItem?.errors]
   );
 
+  const resultsArea = !activeItem ? (
+    <Center style={{ height: "100%", width: "100%" }}>
+      <Stack align="center">
+        <Title weight="normal" align="center">
+          Search a book to get started.
+        </Title>
+        <MediaQuery smallerThan="md" styles={{ display: "none" }}>
+          <Image width={600} fit="contain" src={image} alt="person reading" />
+        </MediaQuery>
+        <MediaQuery largerThan="md" styles={{ display: "none" }}>
+          <Image width={300} fit="contain" src={image} alt="person reading" />
+        </MediaQuery>
+      </Stack>
+    </Center>
+  ) : errorMode ? (
+    errorTable
+  ) : (
+    bookTable
+  );
+
   return (
     <Stack
       spacing={0}
       align="center"
-      sx={(theme) => ({ width: "100%", margin: theme.spacing.xl })}>
+      sx={(theme) => ({
+        width: "100%",
+        height: "100%",
+        margin: theme.spacing.xl,
+        overflow: "hidden"
+      })}>
       <form className={classes.wFull} onSubmit={(e) => searchHandler(e)}>
         <Group
           noWrap
@@ -161,35 +189,39 @@ export default function SearchPage() {
           {activeItem?.errors?.length === 1 ? "Error" : "Errors"}
         </Button>
       )}
-      {!activeItem ? (
-        <Center style={{ height: "100%", width: "100%" }}>
-          <Stack align="center">
-            <Title weight="normal" align="center">
-              Search a book to get started.
-            </Title>
-            <MediaQuery smallerThan="md" styles={{ display: "none" }}>
-              <Image
-                width={600}
-                fit="contain"
-                src={image}
-                alt="person reading"
-              />
-            </MediaQuery>
-            <MediaQuery largerThan="md" styles={{ display: "none" }}>
-              <Image
-                width={300}
-                fit="contain"
-                src={image}
-                alt="person reading"
-              />
-            </MediaQuery>
-          </Stack>
-        </Center>
-      ) : errorMode ? (
-        errorTable
-      ) : (
-        bookTable
-      )}
+
+      {/* Vertical split: results on top, IRC log panel below.
+          When the log panel is hidden, the results take 100%. */}
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          width: "100%",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8
+        }}>
+        <Box
+          sx={{
+            flex: isLogOpen ? "1 1 70%" : "1 1 100%",
+            minHeight: 0,
+            width: "100%",
+            overflow: "hidden",
+            display: "flex"
+          }}>
+          {resultsArea}
+        </Box>
+        {isLogOpen && (
+          <Box
+            sx={{
+              flex: "0 1 30%",
+              minHeight: 80,
+              width: "100%"
+            }}>
+            <IrcLogPanel />
+          </Box>
+        )}
+      </Box>
     </Stack>
   );
 }
