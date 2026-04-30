@@ -25,8 +25,12 @@ func (server *server) NewIrcEventHandler(client *Client) core.EventHandler {
 }
 
 // ircLogHandler forwards raw IRC lines to the browser as IRC_MESSAGE
-// events for the log panel. Skips high-volume protocol noise that has
-// no user-facing value (PING keepalive and 353/366 NAMES traffic).
+// events for the log panel. Filters down to lines actually addressed
+// to the user: PRIVMSG and NOTICE whose target is our IRC nick. That
+// keeps queue/download feedback ("Added ... to queueposition 5",
+// "Sending you the requested file: ...", DCC SEND offers) and drops
+// the firehose of channel chatter, server numerics, JOIN/PART/QUIT,
+// MODE changes, and bot announcements in #ebooks.
 //
 // The send MUST be non-blocking: core.StartReader invokes the Message
 // handler synchronously on the IRC reader goroutine (unlike all other
@@ -35,7 +39,7 @@ func (server *server) NewIrcEventHandler(client *Client) core.EventHandler {
 // DOWNLOAD. On a full per-client send channel we drop the log line.
 func (c *Client) ircLogHandler() core.HandlerFunc {
 	return func(text string) {
-		if isProtocolNoise(text) {
+		if !isUserRelevant(text, c.irc.Username) {
 			return
 		}
 		select {
@@ -46,24 +50,38 @@ func (c *Client) ircLogHandler() core.HandlerFunc {
 	}
 }
 
-// isProtocolNoise reports whether a raw IRC line is a command we filter
-// from the user-facing log: server PING keepalive and the 353/366 NAMES
-// list dump.
-func isProtocolNoise(text string) bool {
-	fields := strings.Fields(text)
-	if len(fields) == 0 {
+// isUserRelevant reports whether a raw IRC line is a PRIVMSG or NOTICE
+// directed at our nick - i.e., a private message the user is meant to
+// see. Returns false for everything else: server numerics, JOIN/PART/
+// QUIT/MODE, channel-target PRIVMSGs, the connection-time "NOTICE Auth"
+// ceremony, etc.
+//
+// Wire format we parse:
+//
+//	[:prefix] CMD target [params...] [:trailing]
+//
+// Comparison is case-insensitive because IRC nicks are.
+func isUserRelevant(text, nick string) bool {
+	if nick == "" {
 		return false
 	}
-	cmd := fields[0]
-	// Skip optional ":nick!user@host" prefix.
-	if strings.HasPrefix(cmd, ":") && len(fields) >= 2 {
-		cmd = fields[1]
+	fields := strings.Fields(text)
+	var cmd, target string
+	if len(fields) >= 1 && strings.HasPrefix(fields[0], ":") {
+		if len(fields) < 3 {
+			return false
+		}
+		cmd, target = fields[1], fields[2]
+	} else {
+		if len(fields) < 2 {
+			return false
+		}
+		cmd, target = fields[0], fields[1]
 	}
-	switch cmd {
-	case "PING", "353", "366":
-		return true
+	if cmd != "PRIVMSG" && cmd != "NOTICE" {
+		return false
 	}
-	return false
+	return strings.EqualFold(target, nick)
 }
 
 // searchResultHandler downloads from DCC server, parses data, and sends data to client

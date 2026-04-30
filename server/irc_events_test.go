@@ -5,55 +5,94 @@ import (
 	"log"
 	"testing"
 	"time"
+
+	"github.com/evan-buss/openbooks/irc"
 )
 
-func TestIsProtocolNoiseFiltersPing(t *testing.T) {
-	if !isProtocolNoise("PING :server.example") {
-		t.Error("PING server keepalive should be filtered")
-	}
-	// Lines from a server-prefixed PING (rare but legal).
-	if !isProtocolNoise(":server.example PING :hello") {
-		t.Error(":prefix PING should be filtered")
-	}
-}
+const testNick = "evan"
 
-func TestIsProtocolNoiseFiltersNames(t *testing.T) {
-	if !isProtocolNoise(":server.tld 353 user = #ebooks :@op +voice user") {
-		t.Error("353 NAMES list reply should be filtered")
-	}
-	if !isProtocolNoise(":server.tld 366 user #ebooks :End of /NAMES list") {
-		t.Error("366 end-of-NAMES should be filtered")
-	}
-}
-
-func TestIsProtocolNoiseAllowsPrivmsgAndNotice(t *testing.T) {
+func TestIsUserRelevantKeepsTargetedPrivmsgAndNotice(t *testing.T) {
 	cases := []string{
-		":SearchBot!u@h NOTICE evan :You are queued at position 3",
-		":bot!u@h PRIVMSG #ebooks :Search currently full",
-		":bot!u@h PRIVMSG evan :DCC SEND book.epub 1 1 1",
+		":Search!u@h NOTICE evan :Your search has been accepted.",
+		":Search!u@h NOTICE evan :returned 27 matches.",
+		":Horla!u@h NOTICE evan :Added Foo - Bar.epub to queueposition 5.",
+		":Horla!u@h NOTICE evan :Sending you the requested file: Foo - Bar.epub",
+		":Horla!u@h PRIVMSG evan :\x01DCC SEND foo.epub 1 1 1\x01",
+		":SearchBot!u@h PRIVMSG evan :\x01DCC SEND results.txt.zip 1 1 1\x01",
+		":ChanServ!s@s NOTICE evan :[#ebooks] Welcome to #ebooks.",
 	}
 	for _, line := range cases {
-		if isProtocolNoise(line) {
-			t.Errorf("expected line NOT to be filtered: %q", line)
+		if !isUserRelevant(line, testNick) {
+			t.Errorf("expected to KEEP: %q", line)
 		}
 	}
 }
 
-func TestIsProtocolNoiseEmptyAndMalformed(t *testing.T) {
-	if isProtocolNoise("") {
-		t.Error("empty line should not be flagged as noise (defensive default)")
+func TestIsUserRelevantDropsChannelAndProtocolNoise(t *testing.T) {
+	cases := []string{
+		// Channel chatter from other users
+		":hell2!h@h PRIVMSG #ebooks :!Horla Rick Mofina - Foo.epub",
+		":bot!b@h PRIVMSG #ebooks :@search results announcement",
+		// Server numerics
+		":hyrule.tx.us.irchighway.net 001 evan :Welcome",
+		":hyrule.tx.us.irchighway.net 005 evan AWAYLEN=200 :are supported",
+		":hyrule.tx.us.irchighway.net 372 evan :- MOTD line",
+		":hyrule.tx.us.irchighway.net 376 evan :End of MOTD.",
+		":hyrule.tx.us.irchighway.net 332 evan #ebooks :Topic text",
+		// Pre-auth connection ceremony - target is the literal "Auth" string
+		":hyrule.tx.us.irchighway.net NOTICE Auth :*** Looking up your hostname...",
+		":hyrule.tx.us.irchighway.net NOTICE Auth :Welcome to irchighway!",
+		// Join / part / quit / mode
+		":evan!u@h JOIN :#ebooks",
+		":evan!u@h MODE evan +x",
+		":someone!u@h QUIT :Ping timeout",
+		":someone!u@h PART #ebooks :leaving",
+		// PING keepalive and NAMES list
+		"PING :server.example",
+		":server.tld 353 evan = #ebooks :@op +voice user",
+		":server.tld 366 evan #ebooks :End of /NAMES list",
+		// Empty / malformed
+		"",
+		"   ",
+		"PING",
 	}
-	if isProtocolNoise("   ") {
-		t.Error("whitespace-only line should not be flagged as noise")
+	for _, line := range cases {
+		if isUserRelevant(line, testNick) {
+			t.Errorf("expected to DROP: %q", line)
+		}
 	}
 }
 
-func TestIrcLogHandlerForwardsValidLines(t *testing.T) {
-	c := &Client{
-		send: make(chan interface{}, 4),
-		log:  log.New(io.Discard, "", 0),
+func TestIsUserRelevantNickMatchIsCaseInsensitive(t *testing.T) {
+	if !isUserRelevant(":bot!u@h NOTICE EVAN :hi", "evan") {
+		t.Error("EVAN should match nick 'evan' (IRC nicks are case-insensitive)")
 	}
-	c.ircLogHandler()(":SearchBot!u@h NOTICE evan :Queued at position 3")
+	if !isUserRelevant(":bot!u@h PRIVMSG Evan :hi", "EVAN") {
+		t.Error("Evan should match nick 'EVAN'")
+	}
+}
+
+func TestIsUserRelevantEmptyNickFailsClosed(t *testing.T) {
+	// If we don't yet know our own nick, nothing is "ours" - drop everything.
+	if isUserRelevant(":bot!u@h NOTICE evan :hi", "") {
+		t.Error("empty nick should drop everything (fail-closed)")
+	}
+}
+
+// newTestClient returns a Client with an irc.Conn whose Username is set,
+// which is what ircLogHandler reads to filter targeted lines.
+func newTestClient(t *testing.T, sendBuf int) *Client {
+	t.Helper()
+	return &Client{
+		send: make(chan interface{}, sendBuf),
+		log:  log.New(io.Discard, "", 0),
+		irc:  irc.New(testNick, "OpenBooks test"),
+	}
+}
+
+func TestIrcLogHandlerForwardsTargetedLines(t *testing.T) {
+	c := newTestClient(t, 4)
+	c.ircLogHandler()(":Horla!u@h NOTICE evan :Added foo to queueposition 3.")
 
 	select {
 	case msg := <-c.send:
@@ -64,28 +103,34 @@ func TestIrcLogHandlerForwardsValidLines(t *testing.T) {
 		if r.MessageType != IRC_MESSAGE {
 			t.Errorf("MessageType = %v, want IRC_MESSAGE", r.MessageType)
 		}
-		if r.Line == "" {
-			t.Error("Line should be populated")
+		if r.Line != ":Horla!u@h NOTICE evan :Added foo to queueposition 3." {
+			t.Errorf("Line = %q, want raw line preserved", r.Line)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected IrcLogResponse on c.send, got nothing")
 	}
 }
 
-func TestIrcLogHandlerSkipsProtocolNoise(t *testing.T) {
-	c := &Client{
-		send: make(chan interface{}, 4),
-		log:  log.New(io.Discard, "", 0),
-	}
+func TestIrcLogHandlerSkipsChannelAndProtocolNoise(t *testing.T) {
+	c := newTestClient(t, 4)
 	handler := c.ircLogHandler()
 
-	handler("PING :server.example")
-	handler(":srv 353 user = #ebooks :@op +voice user")
-	handler(":srv 366 user #ebooks :End of /NAMES list")
+	noise := []string{
+		"PING :server.example",
+		":srv 353 evan = #ebooks :@op +voice user",
+		":srv 366 evan #ebooks :End of /NAMES list",
+		":srv NOTICE Auth :*** Looking up your hostname...",
+		":bot!b@h PRIVMSG #ebooks :channel chatter",
+		":someone!u@h JOIN :#ebooks",
+		":someone!u@h QUIT :Ping timeout",
+	}
+	for _, line := range noise {
+		handler(line)
+	}
 
 	select {
 	case msg := <-c.send:
-		t.Errorf("expected protocol noise to be filtered, got %+v", msg)
+		t.Errorf("expected all noise to be filtered, got %+v", msg)
 	case <-time.After(50 * time.Millisecond):
 		// Good - nothing arrived.
 	}
@@ -93,14 +138,11 @@ func TestIrcLogHandlerSkipsProtocolNoise(t *testing.T) {
 
 func TestIrcLogHandlerDropsWhenSendBufferFull(t *testing.T) {
 	// Buffer of 1 to force the second send into the default branch.
-	c := &Client{
-		send: make(chan interface{}, 1),
-		log:  log.New(io.Discard, "", 0),
-	}
+	c := newTestClient(t, 1)
 	handler := c.ircLogHandler()
 
-	handler(":srv NOTICE evan :first") // fills the buffer
-	handler(":srv NOTICE evan :second") // must be dropped, not block
+	handler(":srv!u@h NOTICE evan :first")  // fills the buffer
+	handler(":srv!u@h NOTICE evan :second") // must be dropped, not block
 
 	// Drain what's there. Only the first should be present.
 	got := 0
