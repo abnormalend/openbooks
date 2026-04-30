@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/evan-buss/openbooks/core"
 )
@@ -19,7 +20,68 @@ func (server *server) NewIrcEventHandler(client *Client) core.EventHandler {
 	handler[core.Ping] = client.pingHandler
 	handler[core.ServerList] = client.userListHandler(server.repository)
 	handler[core.Version] = client.versionHandler(server.config.UserAgent)
+	handler[core.Message] = client.ircLogHandler()
 	return handler
+}
+
+// ircLogHandler forwards raw IRC lines to the browser as IRC_MESSAGE
+// events for the log panel. Filters down to lines actually addressed
+// to the user: PRIVMSG and NOTICE whose target is our IRC nick. That
+// keeps queue/download feedback ("Added ... to queueposition 5",
+// "Sending you the requested file: ...", DCC SEND offers) and drops
+// the firehose of channel chatter, server numerics, JOIN/PART/QUIT,
+// MODE changes, and bot announcements in #ebooks.
+//
+// The send MUST be non-blocking: core.StartReader invokes the Message
+// handler synchronously on the IRC reader goroutine (unlike all other
+// handlers which it dispatches via `go invoke(...)`), so a blocking
+// send here would stall the reader and starve structured events like
+// DOWNLOAD. On a full per-client send channel we drop the log line.
+func (c *Client) ircLogHandler() core.HandlerFunc {
+	return func(text string) {
+		if !isUserRelevant(text, c.irc.Username) {
+			return
+		}
+		select {
+		case c.send <- newIrcLogResponse(text):
+		default:
+			// Channel full; drop rather than block.
+		}
+	}
+}
+
+// isUserRelevant reports whether a raw IRC line is a PRIVMSG or NOTICE
+// directed at our nick - i.e., a private message the user is meant to
+// see. Returns false for everything else: server numerics, JOIN/PART/
+// QUIT/MODE, channel-target PRIVMSGs, the connection-time "NOTICE Auth"
+// ceremony, etc.
+//
+// Wire format we parse:
+//
+//	[:prefix] CMD target [params...] [:trailing]
+//
+// Comparison is case-insensitive because IRC nicks are.
+func isUserRelevant(text, nick string) bool {
+	if nick == "" {
+		return false
+	}
+	fields := strings.Fields(text)
+	var cmd, target string
+	if len(fields) >= 1 && strings.HasPrefix(fields[0], ":") {
+		if len(fields) < 3 {
+			return false
+		}
+		cmd, target = fields[1], fields[2]
+	} else {
+		if len(fields) < 2 {
+			return false
+		}
+		cmd, target = fields[0], fields[1]
+	}
+	if cmd != "PRIVMSG" && cmd != "NOTICE" {
+		return false
+	}
+	return strings.EqualFold(target, nick)
 }
 
 // searchResultHandler downloads from DCC server, parses data, and sends data to client

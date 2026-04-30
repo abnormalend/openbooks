@@ -10,6 +10,7 @@ Reusable React components grouped by their location/role in the UI. The sidebar 
 | Directory | Purpose |
 |-----------|---------|
 | `drawer/` | Right-hand notifications drawer (see `drawer/AGENTS.md`) |
+| `log/` | IRC log panel pinned below the search results (see `log/AGENTS.md`) |
 | `sidebar/` | Left-hand sidebar with `History` and `Library` tabs (see `sidebar/AGENTS.md`) |
 | `tables/` | Virtualized result tables (`BookTable`, `ErrorTable`) and their filters (see `tables/AGENTS.md`) |
 

@@ -17,10 +17,11 @@ import {
   MoonStars,
   Plugs,
   Sidebar as SidebarIcon,
-  Sun
+  Sun,
+  Terminal
 } from "phosphor-react";
 import { toggleDrawer } from "../../state/notificationSlice";
-import { toggleSidebar } from "../../state/stateSlice";
+import { toggleLogPanel, toggleSidebar } from "../../state/stateSlice";
 import { useAppDispatch, useAppSelector } from "../../state/store";
 import History from "./History";
 import Library from "./Library";
@@ -50,6 +51,7 @@ export default function Sidebar() {
   const connected = useAppSelector((store) => store.state.isConnected);
   const username = useAppSelector((store) => store.state.username);
   const opened = useAppSelector((store) => store.state.isSidebarOpen);
+  const isLogOpen = useAppSelector((store) => store.state.isLogOpen);
 
   const [index, setIndex] = useLocalStorage<"books" | "history">({
     key: "sidebar-state",
@@ -147,6 +149,13 @@ export default function Sidebar() {
           </Group>
 
           <Group align="end" spacing="xs">
+            <Tooltip label={`${isLogOpen ? "Hide" : "Show"} IRC log panel`}>
+              <ActionIcon
+                onClick={() => dispatch(toggleLogPanel())}
+                variant={isLogOpen ? "light" : "subtle"}>
+                <Terminal weight="bold" size={18} />
+              </ActionIcon>
+            </Tooltip>
             <ActionIcon onClick={() => toggleColorScheme()}>
               {colorScheme === "dark" ? (
                 <Sun size={18} weight="bold" />

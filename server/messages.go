@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"path"
+	"time"
 
 	"github.com/evan-buss/openbooks/core"
 )
@@ -12,13 +13,18 @@ import (
 //go:generate stringer -type=MessageType
 type MessageType int
 
-// Available commands. These are sent via integers starting at 1
+// Available commands. These are sent via integers starting at 0.
+// Append new values to the end so existing wire-protocol numbers stay
+// stable; renumbering would silently break older clients during a
+// rolling deploy. The TS mirror in server/app/src/state/messages.ts
+// must match exactly (the cross-language drift test enforces this).
 const (
 	STATUS MessageType = iota
 	CONNECT
 	SEARCH
 	DOWNLOAD
 	RATELIMIT
+	IRC_MESSAGE
 )
 
 type NotificationType int
@@ -146,5 +152,23 @@ func newErrorResponse(title string) StatusResponse {
 		MessageType:      STATUS,
 		NotificationType: DANGER,
 		Title:            title,
+	}
+}
+
+// IrcLogResponse carries a single raw IRC line to the browser for the
+// log panel. The frontend appends it to ircLogSlice without raising a
+// notification toast, so this type intentionally does not embed
+// StatusResponse - no Title/Detail/appearance fields would be useful.
+type IrcLogResponse struct {
+	MessageType MessageType `json:"type"`
+	Line        string      `json:"line"`
+	Timestamp   int64       `json:"timestamp"`
+}
+
+func newIrcLogResponse(line string) IrcLogResponse {
+	return IrcLogResponse{
+		MessageType: IRC_MESSAGE,
+		Line:        line,
+		Timestamp:   time.Now().UnixMilli(),
 	}
 }
