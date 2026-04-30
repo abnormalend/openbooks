@@ -12,11 +12,11 @@ If you'd prefer to use OpenBooks from your terminal, check out [CLI Mode](./conf
 
 ### Docker
 
-`docker run -p 8080:80 evanbuss/openbooks`
+`docker run -p 8080:8080 evanbuss/openbooks`
 
 : Basic configuration that exposes the web interface on [http://localhost:8080](http://localhost:8080) and saves all files to an anonymous volume.
 
-`docker run -p 8080:80 -v ~/Downloads/openbooks:/books evanbuss/openbooks --persist`
+`docker run -p 8080:8080 -v ~/Downloads/openbooks:/books evanbuss/openbooks --persist`
 
 : More advanced configuration that exposes the web interface on [http://localhost:8080](http://localhost:8080) and persists all eBook files to the mounted volume at `~/Downloads/openbooks`.
 

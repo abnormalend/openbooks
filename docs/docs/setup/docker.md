@@ -15,7 +15,7 @@ services:
     image: evanbuss/openbooks:latest
     restart: unless-stopped
     ports:
-      - "8080:80"
+      - "8080:8080"
     volumes:
       - "~/Downoads/openbooks:/books"
     command: --persist --name
@@ -28,6 +28,58 @@ services:
 See the [configuration docs](../configuration.md) for a complete list of Server mode configuration options. Pass the configuration flags into the `command` property.
 
 Use the `environment` property to optionally set a custom base path for the server.
+
+## Running as a non-root user
+
+The image is built on `gcr.io/distroless/static`, which has no shell and therefore **does not honor the linuxserver.io-style `PUID`/`PGID` environment variables** — there's no entrypoint script to read them. Setting `PUID=1000` will be silently ignored, and the container will continue to run as root.
+
+Use Docker's native `--user` flag (or the compose `user:` directive) instead. The default port is `8080` (non-privileged), so this works without any command override.
+
+### Docker CLI
+
+```bash
+# One-time on the host: make sure the bind mount is owned by your UID,
+# otherwise the container can't write downloads to it.
+sudo chown -R "$(id -u):$(id -g)" ~/Downloads/openbooks
+
+docker run \
+  --user "$(id -u):$(id -g)" \
+  -p 8080:8080 \
+  -v ~/Downloads/openbooks:/books \
+  evanbuss/openbooks --name my_irc_name --persist
+```
+
+### Docker Compose
+
+```yaml title="docker-compose.yml"
+version: "3.3"
+services:
+  openbooks:
+    container_name: OpenBooks
+    image: evanbuss/openbooks:latest
+    user: "${PUID}:${PGID}"  # native Docker user mapping; despite the
+                             # PUID/PGID names this is NOT the
+                             # linuxserver.io convention - we just
+                             # reuse the env-var spelling for muscle
+                             # memory.
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - "~/Downloads/openbooks:/books"
+    command: --persist --name my_irc_name
+    environment:
+      - BASE_PATH=/openbooks/
+```
+
+Define `PUID` and `PGID` either in a `.env` file next to the compose file or as Portainer "Environment variables" on the stack:
+
+```
+PUID=1000
+PGID=1000
+```
+
+After the container starts, verify the mapping took effect by checking host-side file ownership of any newly downloaded book — it should match your UID, not `0`.
 
 ## Image Tags
 
