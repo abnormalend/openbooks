@@ -1,8 +1,13 @@
 package server
 
 import (
+	"archive/zip"
+	"bytes"
+	"fmt"
 	"io"
 	"log"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -156,5 +161,84 @@ func TestIrcLogHandlerDropsWhenSendBufferFull(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+// startMockDccPayload boots a one-shot TCP listener that, on Accept,
+// writes payload then closes. Returns the bound port and a stop fn.
+func startMockDccPayload(t *testing.T, payload []byte) (port string, stop func()) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.Write(payload)
+	}()
+	return fmt.Sprintf("%d", l.Addr().(*net.TCPAddr).Port), func() {
+		l.Close()
+		wg.Wait()
+	}
+}
+
+func makeSearchResultsZip(t *testing.T, contents string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("results.txt")
+	if err != nil {
+		t.Fatalf("zip create: %v", err)
+	}
+	if _, err := w.Write([]byte(contents)); err != nil {
+		t.Fatalf("zip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// Regression: searchResultHandler must NOT depend on its downloadDir
+// argument existing or being writable. Search-results zips are ephemeral
+// and route through os.TempDir(); a missing/bogus downloadDir should not
+// stop a search from succeeding.
+func TestSearchResultHandlerIgnoresDownloadDir(t *testing.T) {
+	const sample = `Search results from SearchBot
+!DV8 F. Scott Fitzgerald - The Great Gatsby (Epub).rar  ::INFO:: 394.7KB
+!Horla F Scott Fitzgerald - The Great Gatsby (retail) (epub).epub
+`
+	payload := makeSearchResultsZip(t, sample)
+	port, stop := startMockDccPayload(t, payload)
+	defer stop()
+
+	c := newTestClient(t, 4)
+	handler := c.searchResultHandler("/definitely/does/not/exist/at/all")
+
+	// 2130706433 = 127.0.0.1
+	dccText := fmt.Sprintf(
+		":SearchBot!u@h PRIVMSG evan :\x01DCC SEND results.txt.zip 2130706433 %s %d\x01",
+		port, len(payload),
+	)
+	handler(dccText)
+
+	select {
+	case msg := <-c.send:
+		sr, ok := msg.(SearchResponse)
+		if !ok {
+			t.Fatalf("got %T (%+v), want SearchResponse - handler likely fell back to downloadDir", msg, msg)
+		}
+		if len(sr.Books) < 1 {
+			t.Errorf("expected at least 1 book in SearchResponse, got %d", len(sr.Books))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no SearchResponse within 2s")
 	}
 }

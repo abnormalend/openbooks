@@ -84,10 +84,18 @@ func isUserRelevant(text, nick string) bool {
 	return strings.EqualFold(target, nick)
 }
 
-// searchResultHandler downloads from DCC server, parses data, and sends data to client
+// searchResultHandler downloads from DCC server, parses data, and sends data to client.
+//
+// Search-results zips are ephemeral - they exist only long enough to be
+// parsed into the BookDetail array sent over the websocket, then deleted.
+// They have no business living in the user-visible /books directory or
+// any --persist'd bind mount. Routing them through os.TempDir() keeps
+// them on local fast storage (typically tmpfs), avoids touching the
+// possibly-network-backed mount, and means a missing or unwritable
+// download directory can't break search.
 func (c *Client) searchResultHandler(downloadDir string) core.HandlerFunc {
 	return func(text string) {
-		extractedPath, err := core.DownloadExtractDCCString(filepath.Join(downloadDir, "books"), text, nil)
+		extractedPath, err := core.DownloadExtractDCCString(os.TempDir(), text, nil)
 		if err != nil {
 			c.log.Println(err)
 			c.send <- newErrorResponse("Error when downloading search results.")
