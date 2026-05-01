@@ -117,3 +117,27 @@ func TestDownloadExtractDCCStringInvalidDccString(t *testing.T) {
 		t.Error("expected error on malformed DCC SEND, got nil")
 	}
 }
+
+// Regression: DownloadExtractDCCString self-creates baseDir if it
+// doesn't exist, so callers don't have to ensure server.createBooksDirectory
+// fired or that a bind mount survived a recreate.
+func TestDownloadExtractDCCStringCreatesMissingBaseDir(t *testing.T) {
+	parent := t.TempDir()
+	missing := filepath.Join(parent, "books", "deeply", "nested", "subdir")
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("test setup: %s should not exist yet", missing)
+	}
+
+	payload := []byte("epub bytes here")
+	port, stop := startMockDcc(t, payload)
+	defer stop()
+
+	dcc := dccSendString("book.epub", port, len(payload))
+	out, err := DownloadExtractDCCString(missing, dcc, nil)
+	if err != nil {
+		t.Fatalf("expected MkdirAll to create baseDir, got: %v", err)
+	}
+	if filepath.Dir(out) != missing {
+		t.Errorf("output not in created baseDir: dir=%q, base=%q", filepath.Dir(out), missing)
+	}
+}
