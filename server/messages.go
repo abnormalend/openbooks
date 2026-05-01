@@ -139,6 +139,22 @@ func newDownloadResponse(filePath string, disableBrowserDownloads bool) Download
 	return response
 }
 
+// newDownloadFailureResponse signals that a book download attempt finished
+// in failure. We deliberately reuse MessageType.DOWNLOAD (not STATUS) so
+// the frontend's socketMiddleware DOWNLOAD branch fires, which calls
+// removeInFlightDownload and clears the spinning Download button.
+// DownloadPath is left empty so downloadFile() in util.ts is a no-op.
+func newDownloadFailureResponse(reason string) DownloadResponse {
+	return DownloadResponse{
+		StatusResponse: StatusResponse{
+			MessageType:      DOWNLOAD,
+			NotificationType: DANGER,
+			Title:            "Download failed.",
+			Detail:           reason,
+		},
+	}
+}
+
 func newStatusResponse(notificationType NotificationType, title string) StatusResponse {
 	return StatusResponse{
 		MessageType:      STATUS,

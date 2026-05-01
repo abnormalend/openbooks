@@ -138,7 +138,9 @@ func (c *Client) bookResultHandler(downloadDir string, disableBrowserDownloads b
 		extractedPath, err := core.DownloadExtractDCCString(filepath.Join(downloadDir, "books"), text, nil)
 		if err != nil {
 			c.log.Println(err)
-			c.send <- newErrorResponse("Error when downloading book.")
+			// MessageType.DOWNLOAD (not STATUS) so the frontend clears
+			// the spinning Download button alongside surfacing the error.
+			c.send <- newDownloadFailureResponse(err.Error())
 			return
 		}
 
@@ -154,7 +156,10 @@ func (c *Client) noResultsHandler(_ string) {
 
 // BadServer is called when the requested download fails because the server is not available
 func (c *Client) badServerHandler(_ string) {
-	c.send <- newErrorResponse("Server is not available. Try another one.")
+	// MessageType.DOWNLOAD so the frontend pops the in-flight book off
+	// the spinner queue (the bot rejected the request - the download is
+	// not coming).
+	c.send <- newDownloadFailureResponse("Server is not available. Try another one.")
 }
 
 // SearchAccepted is called when the user's query is accepted into the search queue

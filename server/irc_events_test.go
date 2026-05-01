@@ -206,6 +206,59 @@ func makeSearchResultsZip(t *testing.T, contents string) []byte {
 	return buf.Bytes()
 }
 
+// Regression: bookResultHandler's error path must send a DOWNLOAD-typed
+// response (not a STATUS one) so the frontend's socketMiddleware fires
+// removeInFlightDownload and clears the spinning Download button.
+func TestBookResultHandlerErrorClearsSpinner(t *testing.T) {
+	c := newTestClient(t, 4)
+	handler := c.bookResultHandler(t.TempDir(), false)
+
+	// Pass garbage that ParseString will reject - cleanest way to force
+	// DownloadExtractDCCString into its error branch without spinning up
+	// a real DCC server.
+	handler("this is not a valid DCC SEND line")
+
+	select {
+	case msg := <-c.send:
+		dr, ok := msg.(DownloadResponse)
+		if !ok {
+			t.Fatalf("got %T, want DownloadResponse - the spinner won't clear without DOWNLOAD type", msg)
+		}
+		if dr.MessageType != DOWNLOAD {
+			t.Errorf("MessageType = %v, want DOWNLOAD", dr.MessageType)
+		}
+		if dr.NotificationType != DANGER {
+			t.Errorf("NotificationType = %v, want DANGER", dr.NotificationType)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no response within 1s")
+	}
+}
+
+// Regression: badServerHandler must also send a DOWNLOAD-typed response
+// for the same spinner-clearing reason. The bot has rejected the request;
+// no DCC offer is coming, so the in-flight queue needs to advance.
+func TestBadServerHandlerClearsSpinner(t *testing.T) {
+	c := newTestClient(t, 4)
+	c.badServerHandler("")
+
+	select {
+	case msg := <-c.send:
+		dr, ok := msg.(DownloadResponse)
+		if !ok {
+			t.Fatalf("got %T, want DownloadResponse", msg)
+		}
+		if dr.MessageType != DOWNLOAD {
+			t.Errorf("MessageType = %v, want DOWNLOAD", dr.MessageType)
+		}
+		if dr.NotificationType != DANGER {
+			t.Errorf("NotificationType = %v, want DANGER", dr.NotificationType)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no response within 1s")
+	}
+}
+
 // Regression: searchResultHandler must NOT depend on its downloadDir
 // argument existing or being writable. Search-results zips are ephemeral
 // and route through os.TempDir(); a missing/bogus downloadDir should not
