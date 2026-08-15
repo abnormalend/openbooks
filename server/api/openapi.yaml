@@ -1,5 +1,260 @@
 openapi: 3.0.3
 info:
   title: OpenBooks API
-  version: "0"
-paths: {}
+  version: "1.0.0"
+  description: |
+    Job-based REST API for searching IRC book servers and downloading results.
+    Mounted under `<BASE_PATH>api/` (e.g. `/openbooks/api/`).
+
+    Flow: `POST /search` → poll `GET /search/{jobId}` until `complete` →
+    pick a result and `POST /download` with its `full` string → poll
+    `GET /download/{jobId}` until `complete`; the file is then in the
+    library directory.
+
+    All protected routes need `Authorization: Bearer <token>`. If the server
+    was started without `--api-token` / `OPENBOOKS_API_TOKEN` every protected
+    route returns 503 `api_disabled`.
+
+    Only one IRC identity exists: while a browser tab is connected to the
+    websocket UI, `POST` routes return 409 `browser_session_active`; while an
+    API job is running or queued the browser is refused instead.
+servers:
+  - url: /api
+    description: Relative to BASE_PATH
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      summary: Liveness + capability handshake (no auth)
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /openapi.yaml:
+    get:
+      summary: This document (no auth)
+      security: []
+      responses:
+        "200": { description: OK, content: { application/yaml: { schema: { type: string } } } }
+  /search:
+    post:
+      summary: Queue a search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, example: "fourth wing" }
+                limit: { type: integer, minimum: 0, default: 0, description: "Max results to keep; 0 = all" }
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Disabled" }
+  /search/{jobId}:
+    get:
+      summary: Poll a search job
+      parameters: [ { $ref: "#/components/parameters/jobId" } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchJob" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Disabled" }
+  /download:
+    post:
+      summary: Queue a download of one search result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [book]
+              properties:
+                book:
+                  type: string
+                  description: The `full` field of a search result (starts with '!')
+                  example: "!DV8 Rebecca Yarros - Fourth Wing.epub"
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Disabled" }
+  /download/{jobId}:
+    get:
+      summary: Poll a download job
+      parameters: [ { $ref: "#/components/parameters/jobId" } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DownloadJob" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Disabled" }
+  /jobs:
+    get:
+      summary: List live jobs, newest first
+      parameters:
+        - name: type
+          in: query
+          schema: { type: string, enum: [search, download] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      oneOf:
+                        - $ref: "#/components/schemas/SearchJob"
+                        - $ref: "#/components/schemas/DownloadJob"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Disabled" }
+  /servers:
+    get:
+      summary: Known IRC book servers (empty until a session has joined the channel)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: object
+                    properties:
+                      elevatedUsers: { type: array, items: { type: string } }
+                      regularUsers: { type: array, items: { type: string } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Disabled" }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  parameters:
+    jobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Accepted:
+      description: Job queued
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              jobId: { type: string, format: uuid }
+              status: { type: string, enum: [queued] }
+              position: { type: integer, description: 1-based position in the queue }
+    BadRequest:
+      description: Malformed body or parameters (`bad_request`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Unauthorized:
+      description: Missing/invalid bearer token (`unauthorized`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Unknown, expired, or wrong-type job (`job_not_found`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Conflict:
+      description: "`browser_session_active` or `queue_full`"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Disabled:
+      description: No API token configured (`api_disabled`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+    Health:
+      type: object
+      properties:
+        version: { type: string }
+        uptimeSeconds: { type: integer }
+        downloadDir: { type: string }
+        basePath: { type: string }
+        apiEnabled: { type: boolean }
+        ircConnected: { type: boolean }
+        browserConnected: { type: boolean }
+        search: { $ref: "#/components/schemas/QueueState" }
+        download: { $ref: "#/components/schemas/QueueState" }
+    QueueState:
+      type: object
+      properties:
+        running: { type: boolean }
+        queued: { type: integer }
+    JobBase:
+      type: object
+      properties:
+        jobId: { type: string, format: uuid }
+        type: { type: string, enum: [search, download] }
+        status: { type: string, enum: [queued, running, complete, error] }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        error:
+          nullable: true
+          allOf: [ { $ref: "#/components/schemas/Error" } ]
+          description: |
+            Set when status is `error`. Codes: `timeout`, `server_unavailable`,
+            `irc_connect_failed`, `irc_disconnected`, `dcc_failed`,
+            `parse_failed`, `cancelled`.
+    SearchJob:
+      allOf:
+        - $ref: "#/components/schemas/JobBase"
+        - type: object
+          properties:
+            query: { type: string }
+            limit: { type: integer }
+            results:
+              type: array
+              nullable: true
+              description: null until complete; empty array when nothing was found
+              items: { $ref: "#/components/schemas/BookDetail" }
+            parseErrors: { type: integer }
+    DownloadJob:
+      allOf:
+        - $ref: "#/components/schemas/JobBase"
+        - type: object
+          properties:
+            book: { type: string }
+            bytes: { type: integer, description: bytes received so far }
+            size: { type: integer, description: total bytes announced by the bot (0 until known) }
+            path: { type: string, nullable: true, description: absolute path inside the server once complete }
+            fileName: { type: string, nullable: true }
+    BookDetail:
+      type: object
+      properties:
+        server: { type: string, example: DV8 }
+        author: { type: string }
+        title: { type: string }
+        format: { type: string, example: epub }
+        size: { type: string, example: 1.2MB }
+        full:
+          type: string
+          description: Pass this verbatim as `book` to POST /download
+          example: "!DV8 Rebecca Yarros - Fourth Wing.epub"
