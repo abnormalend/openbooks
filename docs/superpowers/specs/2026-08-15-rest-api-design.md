@@ -180,7 +180,8 @@ Every non-2xx from `/api/*` is `{"code":"…","message":"…"}`:
 | 503 | `api_disabled` | no token configured |
 
 Job-level `error.code` values: `timeout`, `server_unavailable`,
-`irc_connect_failed`, `irc_disconnected`, `dcc_failed`, `parse_failed`.
+`irc_connect_failed`, `irc_disconnected`, `dcc_failed`, `parse_failed`,
+`cancelled` (server shutting down while the job waited).
 A search that returns nothing is *not* an error: it finishes `complete` with
 an empty `results` array.
 
