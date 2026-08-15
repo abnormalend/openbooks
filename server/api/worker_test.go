@@ -2,8 +2,6 @@
 package api
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -61,9 +59,10 @@ const sampleResults = `Search results
 !Bot J. R. R. Tolkien - The Hobbit.epub  ::INFO:: 800KB
 `
 
-// writeZipFile writes a zip containing results.txt into dir and returns
-// its path (this is what core.DownloadExtractDCCString would produce
-// *before* extraction; our fake fetch returns the extracted txt instead).
+// writeResultsTxt writes the extracted results.txt a fake fetch would
+// hand back (core.DownloadExtractDCCString normally does the zip fetch
+// *and* extraction; tests stub that whole step and just produce the file
+// it would have left behind).
 func writeResultsTxt(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "results.txt")
@@ -78,8 +77,8 @@ func newTestWorker(t *testing.T, sess sessionAPI) (*Worker, *Registry) {
 	reg := NewRegistry(3, time.Hour)
 	w := NewWorker(reg, sess, NewSearchLimiter(0), WorkerConfig{
 		DownloadDir:     t.TempDir(),
-		SearchTimeout:   500 * time.Millisecond,
-		DownloadTimeout: 500 * time.Millisecond,
+		SearchTimeout:   200 * time.Millisecond,
+		DownloadTimeout: 200 * time.Millisecond,
 	}, log.New(io.Discard, "", 0))
 	w.tempDir = t.TempDir()
 	return w, reg
@@ -221,6 +220,91 @@ func TestSearchDrainsStaleEventsBeforeSending(t *testing.T) {
 	}
 }
 
+func TestSearchJobParseFailed(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+		return filepath.Join(baseDir, "does-not-exist.txt"), nil
+	}
+	job := NewSearchJob("q", 0)
+	sess.searchReply = []Event{{Kind: EvSearchResult, Text: "DCC SEND results.zip 1 2 3"}}
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunSearch(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "parse_failed" {
+		t.Errorf("error = %+v, want parse_failed", snap.Error)
+	}
+}
+
+func TestSearchJobDccFailed(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+		return "", errors.New("connection reset")
+	}
+	job := NewSearchJob("q", 0)
+	sess.searchReply = []Event{{Kind: EvSearchResult, Text: "DCC SEND results.zip 1 2 3"}}
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunSearch(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "dcc_failed" {
+		t.Errorf("error = %+v, want dcc_failed", snap.Error)
+	}
+}
+
+func TestSearchJobLimitZeroReturnsAll(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+		return writeResultsTxt(t, baseDir), nil
+	}
+	job := NewSearchJob("q", 0) // limit 0 means unbounded
+	sess.searchReply = []Event{{Kind: EvSearchResult, Text: "DCC SEND results.zip 1 2 3"}}
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunSearch(ctx)
+	waitStatus(t, reg, job, StatusComplete)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if len(snap.Results) != 3 {
+		t.Errorf("results = %d, want 3 (all, unbounded)", len(snap.Results))
+	}
+}
+
+func TestSearchJobCancelledByContext(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	job := NewSearchJob("q", 0)
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunSearch(ctx)
+	// No reply is queued, so doSearch blocks in its event-wait loop; give
+	// it time to get past Next/Connect/limiter/drain/SearchBook and into
+	// that select before cancelling, well inside the 200ms SearchTimeout,
+	// so the result is unambiguously "cancelled" rather than "timeout".
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	waitStatus(t, reg, job, StatusError)
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "cancelled" {
+		t.Errorf("error = %+v, want cancelled", snap.Error)
+	}
+}
+
 func waitStatus(t *testing.T, reg *Registry, job *Job, want Status) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -233,20 +317,6 @@ func waitStatus(t *testing.T, reg *Registry, job *Job, want Status) {
 	}
 	snap, _ := reg.Get(job.ID)
 	t.Fatalf("job never reached %s; now %s (err %+v)", want, snap.Status, snap.Error)
-}
-
-// makeZip is used by the download tests in Task 6.
-func makeZip(t *testing.T, name, contents string) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	f, err := zw.Create(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Write([]byte(contents))
-	zw.Close()
-	return buf.Bytes()
 }
 
 func TestDownloadJobCompletesWithFile(t *testing.T) {

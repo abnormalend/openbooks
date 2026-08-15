@@ -32,7 +32,11 @@ type WorkerConfig struct {
 // Worker drains the registry queues, one goroutine per job type. Search
 // and download are single-flight each because the IRC bots' DCC SEND
 // replies carry no request identity: whatever arrives while job X is
-// running belongs to X.
+// running belongs to X. A corollary accepted as a limitation of the IRC
+// protocol: a reply that arrives late for a previous job that already
+// timed out — after that job gave up but before the next job's drain —
+// cannot be distinguished from a genuine reply to the current job and
+// will be attributed to it.
 type Worker struct {
 	reg     *Registry
 	sess    sessionAPI
@@ -47,6 +51,11 @@ type Worker struct {
 }
 
 func NewWorker(reg *Registry, sess sessionAPI, limiter *SearchLimiter, cfg WorkerConfig, logger *log.Logger) *Worker {
+	// A dedicated subdirectory keeps search-result zip/txt fetches from
+	// colliding with the browser client's own use of os.TempDir() for the
+	// same well-known file names (e.g. results.txt).
+	tempDir := filepath.Join(os.TempDir(), "openbooks-api")
+	_ = os.MkdirAll(tempDir, 0o755) // best-effort; DownloadExtractDCCString also MkdirAlls
 	return &Worker{
 		reg:     reg,
 		sess:    sess,
@@ -54,7 +63,7 @@ func NewWorker(reg *Registry, sess sessionAPI, limiter *SearchLimiter, cfg Worke
 		cfg:     cfg,
 		log:     logger,
 		fetch:   core.DownloadExtractDCCString,
-		tempDir: os.TempDir(),
+		tempDir: tempDir,
 	}
 }
 
@@ -80,10 +89,21 @@ func (w *Worker) RunDownload(ctx context.Context) {
 	}
 }
 
+// failureMessages gives human-readable text for codes that fail() reports
+// without an underlying error (i.e. the failure is a Worker-observed
+// condition, not something returned by a dependency).
+var failureMessages = map[string]string{
+	"timeout":            "no reply from the IRC bot within the job timeout",
+	"irc_disconnected":   "IRC connection lost",
+	"server_unavailable": "the book server rejected the request; try another server",
+}
+
 func (w *Worker) fail(job *Job, code string, err error) {
 	msg := code
 	if err != nil {
 		msg = err.Error()
+	} else if human, ok := failureMessages[code]; ok {
+		msg = human
 	}
 	w.log.Printf("%s job %s failed: %s: %s", job.Type, job.ID, code, msg)
 	w.reg.Finish(job, &APIError{Code: code, Message: msg})
@@ -104,11 +124,15 @@ func (w *Worker) doSearch(ctx context.Context, job *Job) {
 		w.fail(job, "irc_connect_failed", err)
 		return
 	}
-	drain(w.sess.SearchEvents())
 	if err := w.limiter.Wait(ctx); err != nil {
 		w.fail(job, "cancelled", err)
 		return
 	}
+	// Drain right before sending, not right after Connect: a reply
+	// belonging to a previous, already-timed-out job can land at any
+	// point up to and including while this job is waiting on the rate
+	// limiter, and must not be mistaken for this job's response.
+	drain(w.sess.SearchEvents())
 	w.log.Printf("search job %s: sending %q", job.ID, job.Query)
 	w.sess.SearchBook(job.Query)
 
@@ -140,6 +164,10 @@ func (w *Worker) doSearch(ctx context.Context, job *Job) {
 	}
 }
 
+// completeSearch fetches and parses the results file. The job timeout only
+// bounds the wait for the bot's DCC offer (handled in doSearch); the
+// transfer itself, like completeDownload's, runs to completion or DCC
+// error rather than being bounded by SearchTimeout.
 func (w *Worker) completeSearch(job *Job, dccText string) {
 	path, err := w.fetch(w.tempDir, dccText, nil)
 	if err != nil {

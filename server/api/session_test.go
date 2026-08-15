@@ -353,3 +353,39 @@ func TestSessionLogDirWritesFile(t *testing.T) {
 		t.Error("logFile should be nil after Disconnect")
 	}
 }
+
+func TestSessionConcurrentConnectBothSucceed(t *testing.T) {
+	addr, accepted, stop := fakeIRC(t)
+	defer stop()
+	s := newTestSession(addr, nil)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	for i := range errs {
+		i := i
+		go func() {
+			defer wg.Done()
+			errs[i] = s.Connect()
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("Connect() #%d = %v, want nil", i, err)
+		}
+	}
+	if !s.Connected() {
+		t.Error("Connected() should be true")
+	}
+
+	// Give a wrongly-concurrent second dial a moment to show up before
+	// asserting only one connection was accepted.
+	time.Sleep(100 * time.Millisecond)
+	if n := len(accepted); n != 1 {
+		t.Errorf("accepted %d connections, want 1", n)
+	}
+	conn := <-accepted
+	defer conn.Close()
+}

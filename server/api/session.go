@@ -55,14 +55,15 @@ type Session struct {
 	// join is core.Join in production; tests inject a sleep-free variant.
 	join func(*irc.Conn, string, bool) error
 
-	mu sync.Mutex
-	// connecting is true while a dial/join is in flight; Connect is called
-	// without holding mu across the network round trip, so this guards
-	// against a second concurrent Connect starting its own dial.
-	connecting bool
-	conn       *irc.Conn
-	cancel     context.CancelFunc
-	connected  bool
+	// connectMu serializes Connect calls so a second concurrent caller
+	// blocks behind the first (rather than racing to dial twice), then
+	// observes connected == true under mu and returns nil.
+	connectMu sync.Mutex
+
+	mu        sync.Mutex
+	conn      *irc.Conn
+	cancel    context.CancelFunc
+	connected bool
 	// logFile is the open handle behind the optional per-connection IRC
 	// log (see SessionConfig.LogDir). Closed and nilled out whenever the
 	// connection tears down, from either Disconnect or readerExited.
@@ -94,27 +95,30 @@ func (s *Session) Connected() bool {
 	return s.connected
 }
 
-// Connect dials IRC and starts the reader. No-op when already connected,
-// and no-op (treated as already in progress) when a connection attempt is
-// already underway. The dial/join and log file creation happen without
-// holding s.mu so a slow or hanging network call doesn't block
-// Connected/SearchBook/DownloadBook for the duration.
+// Connect dials IRC and starts the reader. No-op when already connected.
+// Concurrent callers are serialized on connectMu: a second caller blocks
+// until the first finishes dialing, then observes connected == true and
+// returns nil rather than racing to open a second TCP connection (which
+// would otherwise leave one caller holding a *Session with a nil conn,
+// so SearchBook/DownloadBook silently no-op and the job stalls to
+// timeout). The dial/join and log file creation happen without holding
+// s.mu so a slow or hanging network call doesn't block
+// Connected/SearchBook/DownloadBook for the duration; connectMu is only
+// ever held by Connect itself, never across a call into s.mu.
 func (s *Session) Connect() error {
+	s.connectMu.Lock()
+	defer s.connectMu.Unlock()
+
 	s.mu.Lock()
-	if s.connected || s.connecting {
+	if s.connected {
 		s.mu.Unlock()
 		return nil
 	}
-	s.connecting = true
 	s.mu.Unlock()
 
 	conn := irc.New(s.cfg.Nick, s.cfg.UserAgent)
 	joinErr := s.join(conn, s.cfg.Server, s.cfg.TLS)
-
-	s.mu.Lock()
-	s.connecting = false
 	if joinErr != nil {
-		s.mu.Unlock()
 		return joinErr
 	}
 
@@ -130,6 +134,7 @@ func (s *Session) Connect() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
 	s.conn, s.cancel, s.connected, s.logFile = conn, cancel, true, logFile
 	s.mu.Unlock()
 	s.log.Printf("API session connected to %s as %s", s.cfg.Server, s.cfg.Nick)
