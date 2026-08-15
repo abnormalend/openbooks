@@ -44,9 +44,11 @@ func (l *SearchLimiter) Wait(ctx context.Context) error {
 		if ok {
 			return nil
 		}
+		t := time.NewTimer(wait)
 		select {
-		case <-time.After(wait):
+		case <-t.C:
 		case <-ctx.Done():
+			t.Stop()
 			return ctx.Err()
 		}
 	}

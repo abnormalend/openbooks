@@ -164,3 +164,29 @@ func TestJobJSONShapePerType(t *testing.T) {
 		t.Errorf("download json must not carry search fields: %s", b)
 	}
 }
+
+func TestBusyIsTrueFromEnqueueUntilFinish(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	job := NewSearchJob("q", 0)
+	r.Enqueue(job)
+
+	if !r.Busy() {
+		t.Error("Busy should be true right after Enqueue")
+	}
+	if running, queued := r.Counts(JobSearch); running || queued != 1 {
+		t.Errorf("Counts after Enqueue = (%v,%d), want (false,1)", running, queued)
+	}
+
+	r.Next(context.Background(), JobSearch)
+	if !r.Busy() {
+		t.Error("Busy should be true after Next")
+	}
+	if running, queued := r.Counts(JobSearch); !running || queued != 0 {
+		t.Errorf("Counts after Next = (%v,%d), want (true,0)", running, queued)
+	}
+
+	r.Finish(job, nil)
+	if r.Busy() {
+		t.Error("Busy should be false after Finish")
+	}
+}

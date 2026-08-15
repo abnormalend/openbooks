@@ -103,12 +103,17 @@ func (j Job) MarshalJSON() ([]byte, error) {
 
 // Registry is the in-memory job store: a map of all live jobs plus one
 // bounded FIFO queue per job type. Workers pull from the queues with Next.
+//
+// Job.Status in the jobs map is the single source of truth for whether a
+// job is queued/running/finished; Busy and Counts derive their answers from
+// it (rather than from queue length or a separate "running" side table) so
+// there is no window where a job has left the channel but not yet been
+// accounted for.
 type Registry struct {
-	mu      sync.Mutex
-	jobs    map[uuid.UUID]*Job
-	queues  map[JobType]chan *Job
-	running map[JobType]*Job
-	ttl     time.Duration
+	mu     sync.Mutex
+	jobs   map[uuid.UUID]*Job
+	queues map[JobType]chan *Job
+	ttl    time.Duration
 	// lastFinished is used by the idle watcher to decide when to drop IRC.
 	lastFinished time.Time
 	now          func() time.Time
@@ -121,27 +126,39 @@ func NewRegistry(queueDepth int, ttl time.Duration) *Registry {
 			JobSearch:   make(chan *Job, queueDepth),
 			JobDownload: make(chan *Job, queueDepth),
 		},
-		running: make(map[JobType]*Job),
-		ttl:     ttl,
-		now:     time.Now,
+		ttl: ttl,
+		now: time.Now,
 	}
 }
 
 // Enqueue registers the job and places it on its type's queue. Returns
-// the 1-based queue position, or ErrQueueFull.
+// the 1-based queue position, or ErrQueueFull. The job is added to the
+// registry's map before the channel send is attempted (and removed again
+// on ErrQueueFull) so that Busy/Counts/Get never observe a job that is
+// "in flight" between the two but visible in neither.
 func (r *Registry) Enqueue(job *Job) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	job.Status = StatusQueued
+	job.CreatedAt = r.now()
+	r.jobs[job.ID] = job
+
 	q := r.queues[job.Type]
 	select {
 	case q <- job:
 	default:
+		delete(r.jobs, job.ID)
 		return 0, ErrQueueFull
 	}
-	job.Status = StatusQueued
-	job.CreatedAt = r.now()
-	r.jobs[job.ID] = job
-	return len(q), nil
+
+	position := 0
+	for _, j := range r.jobs {
+		if j.Type == job.Type && j.Status == StatusQueued {
+			position++
+		}
+	}
+	return position, nil
 }
 
 // Next blocks until a job of the given type is available (marking it
@@ -153,7 +170,6 @@ func (r *Registry) Next(ctx context.Context, t JobType) *Job {
 		now := r.now()
 		job.Status = StatusRunning
 		job.StartedAt = &now
-		r.running[t] = job
 		r.mu.Unlock()
 		return job
 	case <-ctx.Done():
@@ -180,13 +196,14 @@ func (r *Registry) Finish(job *Job, err *APIError) {
 	} else {
 		job.Status = StatusComplete
 	}
-	if r.running[job.Type] == job {
-		delete(r.running, job.Type)
-	}
 	r.lastFinished = now
 }
 
-// Get returns a snapshot copy of the job.
+// Get returns a snapshot copy of the job. The copy is shallow: slice and
+// pointer fields (Results, StartedAt, FinishedAt, Error, Path, FileName,
+// ...) still point at the same underlying data as the live job. Callers
+// must treat those as read-only and replace them (via Update) rather than
+// mutate through them, or they will race with the owning worker.
 func (r *Registry) Get(id uuid.UUID) (Job, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -198,7 +215,8 @@ func (r *Registry) Get(id uuid.UUID) (Job, bool) {
 }
 
 // List returns snapshots of all live jobs (optionally filtered by type),
-// newest first.
+// newest first. As with Get, each Job is a shallow copy: its slice/pointer
+// fields alias the live job's data and must not be mutated by callers.
 func (r *Registry) List(t JobType) []Job {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -212,22 +230,32 @@ func (r *Registry) List(t JobType) []Job {
 	return out
 }
 
-// Counts reports whether a job of type t is running and how many are queued.
+// Counts reports whether a job of type t is running and how many are
+// queued, derived from Job.Status so it is consistent with Busy and never
+// observes a job mid-transition between queue and running.
 func (r *Registry) Counts(t JobType) (running bool, queued int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.running[t] != nil, len(r.queues[t])
+	for _, j := range r.jobs {
+		if j.Type != t {
+			continue
+		}
+		switch j.Status {
+		case StatusRunning:
+			running = true
+		case StatusQueued:
+			queued++
+		}
+	}
+	return running, queued
 }
 
 // Busy reports whether any job is running or queued.
 func (r *Registry) Busy() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.running) > 0 {
-		return true
-	}
-	for _, q := range r.queues {
-		if len(q) > 0 {
+	for _, j := range r.jobs {
+		if j.Status == StatusQueued || j.Status == StatusRunning {
 			return true
 		}
 	}
