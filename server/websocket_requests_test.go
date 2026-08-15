@@ -10,7 +10,7 @@ import (
 
 func TestRouteMessageRateLimitsSearch(t *testing.T) {
 	s := New(Config{SearchTimeout: 10 * time.Second})
-	s.lastSearch = time.Now() // search just happened, next is rate-limited
+	s.searchLimiter.TryAcquire() // consume the free slot so the next search is rate-limited
 
 	c := &Client{
 		send: make(chan interface{}, 4),
@@ -41,7 +41,7 @@ func TestRouteMessageMalformedPayload(t *testing.T) {
 	// branch (which doesn't touch IRC) instead of trying to write to a
 	// real connection.
 	s := New(Config{SearchTimeout: 10 * time.Second})
-	s.lastSearch = time.Now()
+	s.searchLimiter.TryAcquire() // consume the free slot so the next search is rate-limited
 
 	c := &Client{
 		send: make(chan interface{}, 4),

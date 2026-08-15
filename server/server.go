@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +14,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/rs/cors"
+
+	"github.com/evan-buss/openbooks/server/api"
 )
 
 type server struct {
@@ -35,11 +36,8 @@ type server struct {
 
 	log *log.Logger
 
-	// Mutex to guard the lastSearch timestamp
-	lastSearchMutex sync.Mutex
-
-	// The time the last search was performed. Used to rate limit searches.
-	lastSearch time.Time
+	// Rate limits searches across the browser client and the API worker.
+	searchLimiter *api.SearchLimiter
 }
 
 // Config contains settings for server
@@ -60,12 +58,13 @@ type Config struct {
 
 func New(config Config) *server {
 	return &server{
-		repository: NewRepository(),
-		config:     &config,
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		clients:    make(map[uuid.UUID]*Client),
-		log:        log.New(os.Stdout, "SERVER: ", log.LstdFlags|log.Lmsgprefix),
+		repository:    NewRepository(),
+		config:        &config,
+		register:      make(chan *Client),
+		unregister:    make(chan *Client),
+		clients:       make(map[uuid.UUID]*Client),
+		log:           log.New(os.Stdout, "SERVER: ", log.LstdFlags|log.Lmsgprefix),
+		searchLimiter: api.NewSearchLimiter(config.SearchTimeout),
 	}
 }
 
