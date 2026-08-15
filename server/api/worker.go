@@ -163,9 +163,63 @@ func (w *Worker) completeSearch(job *Job, dccText string) {
 	w.reg.Finish(job, nil)
 }
 
-// doDownload is implemented in Task 6.
 func (w *Worker) doDownload(ctx context.Context, job *Job) {
-	w.fail(job, "not_implemented", nil)
+	if err := w.sess.Connect(); err != nil {
+		w.fail(job, "irc_connect_failed", err)
+		return
+	}
+	drain(w.sess.DownloadEvents())
+	w.log.Printf("download job %s: requesting %q", job.ID, job.Book)
+	w.sess.DownloadBook(job.Book)
+
+	timer := time.NewTimer(w.cfg.DownloadTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case ev := <-w.sess.DownloadEvents():
+			switch ev.Kind {
+			case EvBookResult:
+				w.completeDownload(job, ev.Text)
+				return
+			case EvBadServer:
+				w.fail(job, "server_unavailable", nil)
+				return
+			case EvDisconnected:
+				w.fail(job, "irc_disconnected", nil)
+				return
+			}
+		case <-timer.C:
+			w.fail(job, "timeout", nil)
+			return
+		case <-ctx.Done():
+			w.fail(job, "cancelled", ctx.Err())
+			return
+		}
+	}
+}
+
+// completeDownload runs the DCC transfer into <DownloadDir>/books. The
+// job timeout only bounds the wait for the bot's offer; the transfer
+// itself runs to completion (or DCC error).
+func (w *Worker) completeDownload(job *Job, dccText string) {
+	if d, err := dcc.ParseString(dccText); err == nil {
+		w.reg.Update(job, func(j *Job) { j.Size = d.Size })
+	}
+	progress := &progressWriter{fn: func(n int) {
+		w.reg.Update(job, func(j *Job) { j.Bytes += int64(n) })
+	}}
+	path, err := w.fetch(filepath.Join(w.cfg.DownloadDir, "books"), dccText, progress)
+	if err != nil {
+		w.fail(job, "dcc_failed", err)
+		return
+	}
+	name := filepath.Base(path)
+	w.log.Printf("download job %s: saved %s", job.ID, path)
+	w.reg.Update(job, func(j *Job) {
+		j.Path = &path
+		j.FileName = &name
+	})
+	w.reg.Finish(job, nil)
 }
 
 // progressWriter forwards byte counts to fn; used to update Job.Bytes.
@@ -175,6 +229,3 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	p.fn(len(b))
 	return len(b), nil
 }
-
-var _ = dcc.ParseString // used in Task 6
-var _ = filepath.Join   // used in Task 6

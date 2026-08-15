@@ -248,3 +248,92 @@ func makeZip(t *testing.T, name, contents string) []byte {
 	zw.Close()
 	return buf.Bytes()
 }
+
+func TestDownloadJobCompletesWithFile(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	var fetchedDir string
+	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+		fetchedDir = baseDir
+		p := filepath.Join(baseDir, "great-gatsby.epub")
+		os.MkdirAll(baseDir, 0o755)
+		os.WriteFile(p, []byte("epub-bytes"), 0o644)
+		progress.Write(make([]byte, 5))
+		progress.Write(make([]byte, 5))
+		return p, nil
+	}
+	job := NewDownloadJob("!DV8 F. Scott Fitzgerald - The Great Gatsby.epub")
+	// 2130706433 = 127.0.0.1 ; size 10
+	sess.downloadReply = []Event{{Kind: EvBookResult, Text: ":DV8!x@y PRIVMSG me :DCC SEND great-gatsby.epub 2130706433 6669 10"}}
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusComplete)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if len(sess.downloaded) != 1 || sess.downloaded[0] != job.Book {
+		t.Errorf("downloaded = %v", sess.downloaded)
+	}
+	if want := filepath.Join(w.cfg.DownloadDir, "books"); fetchedDir != want {
+		t.Errorf("fetch dir = %q, want %q", fetchedDir, want)
+	}
+	if snap.Size != 10 || snap.Bytes != 10 {
+		t.Errorf("size/bytes = %d/%d, want 10/10", snap.Size, snap.Bytes)
+	}
+	if snap.Path == nil || snap.FileName == nil || *snap.FileName != "great-gatsby.epub" {
+		t.Errorf("path/fileName = %v/%v", snap.Path, snap.FileName)
+	}
+}
+
+func TestDownloadJobBadServer(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	job := NewDownloadJob("!Nope book.epub")
+	sess.downloadReply = []Event{{Kind: EvBadServer}}
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "server_unavailable" {
+		t.Errorf("error = %+v", snap.Error)
+	}
+}
+
+func TestDownloadJobTimeout(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	job := NewDownloadJob("!Slow book.epub")
+	reg.Enqueue(job)
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "timeout" {
+		t.Errorf("error = %+v", snap.Error)
+	}
+}
+
+func TestDownloadJobDccFailure(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+		return "", errors.New("connection reset")
+	}
+	job := NewDownloadJob("!DV8 book.epub")
+	sess.downloadReply = []Event{{Kind: EvBookResult, Text: "DCC SEND book.epub 2130706433 6669 10"}}
+	reg.Enqueue(job)
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "dcc_failed" {
+		t.Errorf("error = %+v", snap.Error)
+	}
+}
