@@ -179,9 +179,10 @@ Every non-2xx from `/api/*` is `{"code":"…","message":"…"}`:
 | 409 | `queue_full` | 3 jobs already queued for that type |
 | 503 | `api_disabled` | no token configured |
 
-Job-level `error.code` values: `timeout`, `no_results` is *not* an error
-(complete, empty), `server_unavailable`, `irc_connect_failed`,
-`irc_disconnected`, `dcc_failed`, `parse_failed`.
+Job-level `error.code` values: `timeout`, `server_unavailable`,
+`irc_connect_failed`, `irc_disconnected`, `dcc_failed`, `parse_failed`.
+A search that returns nothing is *not* an error: it finishes `complete` with
+an empty `results` array.
 
 ## Config & CLI
 
