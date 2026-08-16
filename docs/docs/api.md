@@ -112,6 +112,7 @@ It always starts with `!`. Formats seen in the wild:
 | DELETE | `/download/{jobId}` | yes | cancel a queued or running download job → `200` job (`status: cancelled`) |
 | GET | `/jobs?type=` | yes | all live jobs, newest first |
 | GET | `/servers` | yes | known book servers (from the IRC user list) |
+| GET | `/server-stats` | yes | per-server reliability stats derived from this API's own job outcomes (see [Server health](#server-health)) |
 
 Requests to unmatched `/api` routes get `404 {"code":"not_found"}`; matched
 routes called with the wrong HTTP method get `405 {"code":"method_not_allowed"}`.
@@ -132,6 +133,59 @@ Every non-2xx body is `{"code":"…","message":"…"}`.
 Job-level `error.code`: `timeout`, `server_unavailable`, `irc_connect_failed`,
 `irc_disconnected`, `dcc_failed`, `parse_failed`, `cancelled`,
 `browser_session_active`.
+
+## Server health
+
+`GET /server-stats` returns per-server reliability stats the API accumulates
+passively from its own search/download job outcomes and queue notices — it
+does **not** actively probe the book servers (IRC bots don't expose a "how
+deep is your queue" query). `GET /servers` is unchanged: it still returns the
+raw NAMES-derived presence list only.
+
+```json
+{
+  "servers": [
+    {
+      "server": "DV8",
+      "online": true,
+      "attempts": 12,
+      "completed": 11,
+      "failed": 1,
+      "failuresByCode": { "timeout": 1 },
+      "lastQueuePosition": 4,
+      "lastQueuePositionAt": "2026-08-16T01:23:45Z",
+      "recentFailStreak": 0,
+      "lastSuccessAt": "2026-08-16T01:24:10Z",
+      "lastFailureAt": "2026-08-15T22:01:00Z",
+      "avgCompleteSeconds": 8.4,
+      "health": "healthy"
+    }
+  ]
+}
+```
+
+Results are sorted `healthy` → `unknown` → `degraded` → `down`, then by
+server name.
+
+**`lastQueuePosition` is our own last-observed queue position at that
+server** (from an `EvQueuePosition` notice seen during a prior download) —
+it is *not* a live queue-depth query; there is no such thing on the IRC
+protocol. Treat it as "how deep we were last time", not "how deep right now".
+
+`health` is a deterministic label, first match wins:
+
+| Label | Meaning |
+|---|---|
+| `unknown` | No terminal outcome yet (no completions and no failures — including a cold-start server with a request still in flight). Deliberately **neutral**, not penalized: a server with no track record ranks above `degraded`/`down` so the "avoid this server" folklore can't self-reinforce forever against servers nobody has tried recently. |
+| `down` | Offline (absent from the current NAMES list), or 3+ consecutive failures with no success in the last hour. |
+| `healthy` | A success within the last hour and a success rate ≥ 60% (cancellations excluded from the rate). |
+| `degraded` | Has outcomes but matches none of the above. |
+
+The raw counts (`attempts`, `completed`, `failed`, `failuresByCode`,
+`recentFailStreak`) are always included alongside `health` so a caller can
+apply its own policy instead of trusting the label outright.
+
+Stats are in-memory only in this version and reset on redeploy/restart.
 
 ## Limits and behaviour
 
