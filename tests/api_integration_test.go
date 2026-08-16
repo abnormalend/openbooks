@@ -54,6 +54,12 @@ func startApiIrcServer(t *testing.T, resultsPort string, resultsSize int, bookPo
 				fmt.Fprintf(conn, ":search!u@h PRIVMSG tester :DCC SEND Search_results_for__gatsby.txt.zip 2130706433 %s %d\r\n", resultsPort, resultsSize)
 			case strings.HasPrefix(line, "PRIVMSG #ebooks :!"):
 				fmt.Fprintf(conn, ":DV8!u@h NOTICE tester :Added to queueposition 2.\r\n")
+				// Real bots queue you for a while before sending the file. The
+				// brief pause also makes the test deterministic: core.StartReader
+				// dispatches handlers via `go invoke`, so a back-to-back notice +
+				// DCC offer would race onto the download channel and the download
+				// could complete before the queue position is recorded.
+				time.Sleep(150 * time.Millisecond)
 				fmt.Fprintf(conn, ":DV8!u@h PRIVMSG tester :DCC SEND great-gatsby.epub 2130706433 %s %d\r\n", bookPort, bookSize)
 			}
 		}
