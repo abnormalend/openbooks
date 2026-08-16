@@ -38,8 +38,8 @@ func (r *readerConn) SetWriteDeadline(time.Time) error { return nil }
 // races. StartReader dispatches handlers as goroutines, so naive
 // chan + close patterns fail under -race.
 type recorder struct {
-	mu    sync.Mutex
-	seen  []event
+	mu   sync.Mutex
+	seen []event
 }
 
 func (r *recorder) record(e event) func(string) {

@@ -66,7 +66,10 @@ func (i *Conn) Disconnect() {
 // Write overrides the promoted net.Conn.Write to arm a write deadline first,
 // so a blocked send errors out instead of hanging indefinitely.
 func (i *Conn) Write(b []byte) (int, error) {
-	i.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if !i.IsConnected() {
+		return 0, net.ErrClosed
+	}
+	_ = i.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return i.Conn.Write(b)
 }
 

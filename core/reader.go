@@ -74,6 +74,11 @@ func StartReader(ctx context.Context, irc *irc.Conn, handler EventHandler) {
 					event = BookResult
 				}
 			} else if strings.Contains(lower, queuePosition) || strings.Contains(lower, queuePositionAlt) {
+				// Deliberately checked above the NOTICE/353 branches: a queue
+				// line can arrive as either NOTICE or PRIVMSG, and in practice
+				// the phrases "queueposition"/"queue position" are disjoint
+				// from Sorry/matches/try-another-server, so catching it first
+				// doesn't steal those classifications.
 				event = QueuePosition
 			} else if strings.Contains(text, noticeMessage) {
 				if strings.Contains(text, noResults) {

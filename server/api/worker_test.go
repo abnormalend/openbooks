@@ -523,27 +523,54 @@ func TestDownloadRecordsQueuePositionThenCompletes(t *testing.T) {
 func TestQueuePositionResetsTimerButCapBounds(t *testing.T) {
 	sess := newFakeSession()
 	w, reg := newTestWorker(t, sess)
-	// Very short base timeout; only ever send queue notices, never a book.
+	// Very short base timeout; the feeder goroutine below streams queue
+	// notices continuously (faster than the base timeout) so the timer
+	// keeps getting reset and the job can only ever fail at the absolute
+	// cap (2x base), never at one un-reset base interval.
 	w.cfg.DownloadTimeout = 40 * time.Millisecond
-	// Emit several queue notices to exercise the reset, then go silent.
-	sess.downloadReply = []Event{
-		{Kind: EvQueuePosition, Text: "queueposition 9"},
-		{Kind: EvQueuePosition, Text: "queueposition 8"},
-	}
+
 	job := NewDownloadJob("!DV8 book.epub")
 	reg.Enqueue(job)
 
+	stop := make(chan struct{})
+	feederDone := make(chan struct{})
+	go func() {
+		defer close(feederDone)
+		ticker := time.NewTicker(15 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				select {
+				case sess.downloadEv <- Event{Kind: EvQueuePosition, Text: "queueposition 7"}:
+				case <-stop:
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
 	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
 	go w.RunDownload(ctx)
-	// Must still terminate at the cap (2x=80ms) even though queue notices reset the timer.
+	// Must still terminate at the cap (2x=80ms) even though continuous
+	// queue notices keep resetting the timer. An unbounded reset would
+	// never fail (it would run until the feeder stops / this call times
+	// out waitStatus's own 3s deadline).
 	waitStatus(t, reg, job, StatusError)
+	elapsed := time.Since(start)
+	close(stop)
+	<-feederDone
 	cancel()
+
+	if elapsed < 70*time.Millisecond || elapsed >= 200*time.Millisecond {
+		t.Errorf("elapsed = %s, want >= 70ms and < 200ms (base 40ms, cap 80ms)", elapsed)
+	}
 	snap, _ := reg.Get(job.ID)
 	if snap.Error == nil || snap.Error.Code != "timeout" {
 		t.Errorf("error = %+v, want timeout", snap.Error)
-	}
-	if snap.QueuePosition != 8 {
-		t.Errorf("QueuePosition = %d, want 8 (last seen)", snap.QueuePosition)
 	}
 }
 
