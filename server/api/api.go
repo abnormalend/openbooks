@@ -26,6 +26,11 @@ type Config struct {
 	Version     string
 	BasePath    string
 	DownloadDir string
+	// LibrarySubdir is the subdirectory under DownloadDir where downloaded
+	// books are stored. Empty is a valid, intended value meaning "the
+	// DownloadDir root" — it must NOT be defaulted here; the server sets
+	// it explicitly (the CLI flag's default is "books").
+	LibrarySubdir string
 
 	IdleTimeout     time.Duration // disconnect IRC after this long with no jobs (default 5m)
 	SearchTimeout   time.Duration // default 120s
@@ -84,6 +89,7 @@ func New(cfg Config, deps Deps) *API {
 	sess := NewSession(cfg.Session, deps.Log, deps.OnServerList)
 	worker := NewWorker(reg, sess, deps.Limiter, WorkerConfig{
 		DownloadDir:      cfg.DownloadDir,
+		LibrarySubdir:    cfg.LibrarySubdir,
 		SearchTimeout:    cfg.SearchTimeout,
 		DownloadTimeout:  cfg.DownloadTimeout,
 		BrowserConnected: deps.BrowserConnected,

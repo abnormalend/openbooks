@@ -7,7 +7,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -139,5 +142,50 @@ func TestLegacyRoutesStillWork(t *testing.T) {
 	res, _ = http.Get(ts.URL + "/openbooks/stats")
 	if res.StatusCode != 200 {
 		t.Errorf("/stats = %d", res.StatusCode)
+	}
+}
+
+func TestLibraryHonorsSubdir(t *testing.T) {
+	dir := t.TempDir()
+	// empty subdir → library reads the dir root
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "root-book.epub"), []byte("x"), 0o644)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h := NewHandler(ctx, Config{
+		Basepath: "/openbooks/", DownloadDir: dir, LibrarySubdir: "", Persist: true,
+		SearchTimeout: 10 * time.Second, UserName: "t", Server: silentIRC(t), APIToken: "tok", Version: "t",
+	})
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+
+	// /library sits behind requireUser, which needs the "OpenBooks" session
+	// cookie. serveWs mints one (via Set-Cookie) on any request that lacks
+	// it, before it ever gets to the websocket upgrade itself, so a plain
+	// GET to /ws with a cookie jar is enough to obtain a valid session.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+	if _, err := client.Get(ts.URL + "/openbooks/ws"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := client.Get(ts.URL + "/openbooks/library")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var books []map[string]any
+	json.NewDecoder(res.Body).Decode(&books)
+	found := false
+	for _, b := range books {
+		if b["name"] == "root-book.epub" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("empty subdir: library did not list root-book.epub: %v", books)
 	}
 }
