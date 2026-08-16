@@ -30,6 +30,7 @@ func (server *server) registerRoutes() *chi.Mux {
 	router.Get("/ws", server.serveWs())
 	router.Get("/stats", server.statsHandler())
 	router.Get("/servers", server.serverListHandler())
+	router.Mount("/api", server.api.Router())
 
 	router.Group(func(r chi.Router) {
 		r.Use(server.requireUser)
@@ -64,6 +65,15 @@ func (server *server) serveWs() http.HandlerFunc {
 		// Don't connect to IRC or create new client
 		if err != nil || alreadyConnected || len(server.clients) > 0 {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// One IRC identity: the API session must let go before a browser
+		// may connect. Refuse if an API job is running or queued.
+		if !server.api.Yield() {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte("API session active; try again when the API job queue is empty."))
 			return
 		}
 

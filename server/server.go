@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/cors"
 
+	"github.com/evan-buss/openbooks/core"
 	"github.com/evan-buss/openbooks/server/api"
 )
 
@@ -38,6 +39,9 @@ type server struct {
 
 	// Rate limits searches across the browser client and the API worker.
 	searchLimiter *api.SearchLimiter
+
+	// REST API façade (mounted at <basepath>api).
+	api *api.API
 }
 
 // Config contains settings for server
@@ -54,10 +58,18 @@ type Config struct {
 	SearchBot               string
 	DisableBrowserDownloads bool
 	UserAgent               string
+
+	// REST API (server/api). Empty APIToken disables the API (503s).
+	APIToken           string
+	APIIdleTimeout     time.Duration
+	SearchJobTimeout   time.Duration
+	DownloadJobTimeout time.Duration
+	// Version is reported by /api/health.
+	Version string
 }
 
 func New(config Config) *server {
-	return &server{
+	s := &server{
 		repository:    NewRepository(),
 		config:        &config,
 		register:      make(chan *Client),
@@ -66,10 +78,40 @@ func New(config Config) *server {
 		log:           log.New(os.Stdout, "SERVER: ", log.LstdFlags|log.Lmsgprefix),
 		searchLimiter: api.NewSearchLimiter(config.SearchTimeout),
 	}
+	logDir := ""
+	if config.Log {
+		logDir = config.DownloadDir
+	}
+	s.api = api.New(api.Config{
+		Token:           config.APIToken,
+		Version:         config.Version,
+		BasePath:        config.Basepath,
+		DownloadDir:     config.DownloadDir,
+		IdleTimeout:     config.APIIdleTimeout,
+		SearchTimeout:   config.SearchJobTimeout,
+		DownloadTimeout: config.DownloadJobTimeout,
+		Session: api.SessionConfig{
+			Nick:      config.UserName,
+			UserAgent: config.UserAgent,
+			Server:    config.Server,
+			TLS:       config.EnableTLS,
+			SearchBot: config.SearchBot,
+			LogDir:    logDir,
+		},
+	}, api.Deps{
+		Limiter:          s.searchLimiter,
+		BrowserConnected: func() bool { return len(s.clients) > 0 },
+		Servers:          func() core.IrcServers { return s.repository.servers },
+		OnServerList:     func(sv core.IrcServers) { s.repository.servers = sv },
+		Log:              log.New(os.Stdout, "API: ", log.LstdFlags|log.Lmsgprefix),
+	})
+	return s
 }
 
-// Start instantiates the web server and opens the browser
-func Start(config Config) {
+// NewHandler builds the full HTTP handler (SPA, websocket, legacy REST and
+// the /api group mounted under config.Basepath) and starts the background
+// goroutines bound to ctx. Start wraps it; tests drive it via httptest.
+func NewHandler(ctx context.Context, config Config) http.Handler {
 	createBooksDirectory(config)
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -80,23 +122,36 @@ func Start(config Config) {
 		AllowCredentials: true,
 		AllowedOrigins:   []string{"http://127.0.0.1:5173"},
 		AllowedHeaders:   []string{"*"},
-		AllowedMethods:   []string{"GET", "DELETE"},
+		AllowedMethods:   []string{"GET", "POST", "DELETE"},
 	}
 	router.Use(cors.New(corsConfig).Handler)
 
 	server := New(config)
 	routes := server.registerRoutes()
 
-	ctx, cancel := context.WithCancel(context.Background())
 	go server.startClientHub(ctx)
-	server.registerGracefulShutdown(cancel)
+	server.api.Start(ctx)
 	router.Mount(config.Basepath, routes)
 
 	server.log.Printf("Base Path: %s\n", config.Basepath)
-	server.log.Printf("OpenBooks is listening on port %v", config.Port)
 	server.log.Printf("Download Directory: %s\n", config.DownloadDir)
-	server.log.Printf("Open http://localhost:%v%s in your browser.", config.Port, config.Basepath)
-	server.log.Fatal(http.ListenAndServe(":"+config.Port, router))
+	if config.APIToken == "" {
+		server.log.Println("REST API disabled (no --api-token / OPENBOOKS_API_TOKEN)")
+	} else {
+		server.log.Printf("REST API enabled at %sapi/\n", config.Basepath)
+	}
+	return router
+}
+
+// Start instantiates the web server and blocks.
+func Start(config Config) {
+	ctx, cancel := context.WithCancel(context.Background())
+	router := NewHandler(ctx, config)
+	registerGracefulShutdown(cancel)
+
+	log.Printf("SERVER: OpenBooks is listening on port %v", config.Port)
+	log.Printf("SERVER: Open http://localhost:%v%s in your browser.", config.Port, config.Basepath)
+	log.Fatal(http.ListenAndServe(":"+config.Port, router))
 }
 
 // The client hub is to be run in a goroutine and handles management of
@@ -125,12 +180,12 @@ func (server *server) startClientHub(ctx context.Context) {
 	}
 }
 
-func (server *server) registerGracefulShutdown(cancel context.CancelFunc) {
+func registerGracefulShutdown(cancel context.CancelFunc) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		server.log.Println("Graceful shutdown.")
+		log.Println("SERVER: Graceful shutdown.")
 		// Close the shutdown channel. Triggering all reader/writer WS handlers to close.
 		cancel()
 		time.Sleep(time.Second)
