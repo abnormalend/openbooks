@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/evan-buss/openbooks/core"
 )
 
 // silentIRC is a TCP listener that accepts connections and never speaks.
@@ -96,6 +98,35 @@ func TestWebsocketRefusedWhileAPIJobQueued(t *testing.T) {
 	res, _ = http.Get(ts.URL + "/openbooks/ws")
 	if res.StatusCode != 409 {
 		t.Errorf("/ws while API busy = %d, want 409", res.StatusCode)
+	}
+}
+
+func TestServerListHandlerReturnsRepositoryServers(t *testing.T) {
+	s := New(Config{
+		Basepath:    "/",
+		DownloadDir: t.TempDir(),
+	})
+	want := core.IrcServers{
+		ElevatedUsers: []string{"alice"},
+		RegularUsers:  []string{"bob"},
+	}
+	s.repository.SetServers(want)
+
+	router := s.registerRoutes()
+	req := httptest.NewRequest("GET", "/servers", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("/servers = %d", rec.Code)
+	}
+	var got core.IrcServers
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ElevatedUsers) != 1 || got.ElevatedUsers[0] != "alice" ||
+		len(got.RegularUsers) != 1 || got.RegularUsers[0] != "bob" {
+		t.Errorf("servers = %+v, want %+v", got, want)
 	}
 }
 

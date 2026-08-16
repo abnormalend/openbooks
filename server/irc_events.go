@@ -172,6 +172,6 @@ func (c *Client) versionHandler(version string) core.HandlerFunc {
 
 func (c *Client) userListHandler(repo *Repository) core.HandlerFunc {
 	return func(text string) {
-		repo.servers = core.ParseServers(text)
+		repo.SetServers(core.ParseServers(text))
 	}
 }

@@ -63,7 +63,7 @@ func (server *server) serveWs() http.HandlerFunc {
 
 		// If invalid UUID or the same browser tries to connect again or multiple browser connections
 		// Don't connect to IRC or create new client
-		if err != nil || alreadyConnected || len(server.clients) > 0 {
+		if err != nil || alreadyConnected || server.clientCount.Load() > 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -143,7 +143,7 @@ func (server *server) statsHandler() http.HandlerFunc {
 
 func (server *server) serverListHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(server.repository.servers)
+		json.NewEncoder(w).Encode(server.repository.Servers())
 	}
 }
 

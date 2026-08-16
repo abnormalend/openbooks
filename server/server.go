@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/cors"
 
-	"github.com/evan-buss/openbooks/core"
 	"github.com/evan-buss/openbooks/server/api"
 )
 
@@ -42,6 +42,11 @@ type server struct {
 
 	// REST API façade (mounted at <basepath>api).
 	api *api.API
+
+	// clientCount mirrors len(clients) without needing the hub goroutine;
+	// read from other goroutines (serveWs, the API's BrowserConnected
+	// check) that must not touch the clients map directly.
+	clientCount atomic.Int32
 }
 
 // Config contains settings for server
@@ -100,9 +105,9 @@ func New(config Config) *server {
 		},
 	}, api.Deps{
 		Limiter:          s.searchLimiter,
-		BrowserConnected: func() bool { return len(s.clients) > 0 },
-		Servers:          func() core.IrcServers { return s.repository.servers },
-		OnServerList:     func(sv core.IrcServers) { s.repository.servers = sv },
+		BrowserConnected: func() bool { return s.clientCount.Load() > 0 },
+		Servers:          s.repository.Servers,
+		OnServerList:     s.repository.SetServers,
 		Log:              log.New(os.Stdout, "API: ", log.LstdFlags|log.Lmsgprefix),
 	})
 	return s
@@ -161,12 +166,14 @@ func (server *server) startClientHub(ctx context.Context) {
 		select {
 		case client := <-server.register:
 			server.clients[client.uuid] = client
+			server.clientCount.Add(1)
 		case client := <-server.unregister:
 			if _, ok := server.clients[client.uuid]; ok {
 				_, cancel := context.WithCancel(client.ctx)
 				close(client.send)
 				cancel()
 				delete(server.clients, client.uuid)
+				server.clientCount.Add(-1)
 			}
 		case <-ctx.Done():
 			for _, client := range server.clients {
@@ -174,6 +181,7 @@ func (server *server) startClientHub(ctx context.Context) {
 				close(client.send)
 				cancel()
 				delete(server.clients, client.uuid)
+				server.clientCount.Add(-1)
 			}
 			return
 		}
