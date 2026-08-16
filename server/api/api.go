@@ -56,6 +56,7 @@ type API struct {
 	reg     *Registry
 	sess    *Session
 	worker  *Worker
+	stats   *ServerStats
 	started time.Time
 	once    sync.Once
 }
@@ -87,14 +88,16 @@ func New(cfg Config, deps Deps) *API {
 	}
 	reg := NewRegistry(cfg.QueueDepth, cfg.JobTTL)
 	sess := NewSession(cfg.Session, deps.Log, deps.OnServerList)
+	stats := NewServerStats()
 	worker := NewWorker(reg, sess, deps.Limiter, WorkerConfig{
 		DownloadDir:      cfg.DownloadDir,
 		LibrarySubdir:    cfg.LibrarySubdir,
 		SearchTimeout:    cfg.SearchTimeout,
 		DownloadTimeout:  cfg.DownloadTimeout,
 		BrowserConnected: deps.BrowserConnected,
+		Stats:            stats,
 	}, deps.Log)
-	return &API{cfg: cfg, deps: deps, reg: reg, sess: sess, worker: worker, started: time.Now()}
+	return &API{cfg: cfg, deps: deps, reg: reg, sess: sess, worker: worker, stats: stats, started: time.Now()}
 }
 
 // Start launches the workers, the TTL sweeper and the idle watcher.
@@ -177,6 +180,7 @@ func (a *API) Router() chi.Router {
 		p.Delete("/download/{id}", a.cancelJob(JobDownload))
 		p.Get("/jobs", a.listJobs)
 		p.Get("/servers", a.servers)
+		p.Get("/server-stats", a.serverStats)
 	})
 	return r
 }
@@ -322,6 +326,18 @@ func (a *API) listJobs(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) servers(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{"servers": a.deps.Servers()})
+}
+
+// serverStats returns the API's own accumulated per-server reliability
+// stats (see ServerStats), with Online merged in from the current NAMES
+// presence list. lastQueuePosition is our last-observed position at that
+// server, not live queue depth (IRC book bots don't expose that on demand).
+func (a *API) serverStats(w http.ResponseWriter, _ *http.Request) {
+	online := map[string]bool{}
+	for _, name := range a.deps.Servers().ElevatedUsers {
+		online[name] = true
+	}
+	writeJSON(w, 200, map[string]interface{}{"servers": a.stats.Snapshot(online)})
 }
 
 func methodNotAllowed(w http.ResponseWriter, _ *http.Request) {

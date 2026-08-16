@@ -633,3 +633,71 @@ func TestQueuedDownloadCancelledIsSkipped(t *testing.T) {
 		t.Error("cancelled queued job should not be sent to IRC")
 	}
 }
+
+func TestDownloadRecordsServerStats(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	stats := NewServerStats()
+	w.stats = stats
+	w.fetchCtx = func(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error) {
+		p := filepath.Join(baseDir, "b.epub")
+		os.MkdirAll(baseDir, 0o755)
+		os.WriteFile(p, []byte("x"), 0o644)
+		return p, nil
+	}
+	sess.downloadReply = []Event{
+		{Kind: EvQueuePosition, Text: "queueposition 4"},
+		{Kind: EvBookResult, Text: "DCC SEND b.epub 2130706433 6669 1"},
+	}
+	job := NewDownloadJob("!DV8 Author - Title.epub")
+	reg.Enqueue(job)
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusComplete)
+	cancel()
+
+	snap := stats.Snapshot(map[string]bool{"DV8": true})
+	if len(snap) != 1 || snap[0].Server != "DV8" {
+		t.Fatalf("snap = %+v", snap)
+	}
+	r := snap[0]
+	if r.Attempts != 1 || r.Completed != 1 || r.LastQueuePosition != 4 {
+		t.Errorf("stat = %+v", r)
+	}
+}
+
+func TestDownloadServerUnavailableRecordsFailure(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	stats := NewServerStats()
+	w.stats = stats
+	sess.downloadReply = []Event{{Kind: EvBadServer}}
+	job := NewDownloadJob("!Bsk Author - Title.epub")
+	reg.Enqueue(job)
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+	r := stats.Snapshot(map[string]bool{})[0]
+	if r.FailuresByCode["server_unavailable"] != 1 || r.Failed != 1 {
+		t.Errorf("stat = %+v", r)
+	}
+}
+
+func TestBrowserBlockDoesNotBlameServer(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	stats := NewServerStats()
+	w.stats = stats
+	w.cfg.BrowserConnected = func() bool { return true }
+	job := NewDownloadJob("!DV8 Author - Title.epub")
+	reg.Enqueue(job)
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+	// browser_session_active is our-side; the server must not be recorded.
+	if len(stats.Snapshot(map[string]bool{})) != 0 {
+		t.Errorf("server wrongly recorded: %+v", stats.Snapshot(map[string]bool{}))
+	}
+}

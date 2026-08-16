@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/evan-buss/openbooks/core"
@@ -40,6 +41,10 @@ type WorkerConfig struct {
 	// wins: the job fails fast with browser_session_active instead of
 	// stealing the one IRC identity out from under the browser.
 	BrowserConnected func() bool
+
+	// Stats, if set, records per-server download outcomes. Nil is valid
+	// (stats collection is optional / off in tests that don't need it).
+	Stats *ServerStats
 }
 
 // Worker drains the registry queues, one goroutine per job type. Search
@@ -65,6 +70,10 @@ type Worker struct {
 	// in production, stubbed in tests.
 	fetchCtx func(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error)
 	tempDir  string
+
+	// stats records per-server download outcomes; nil-safe (nil disables
+	// recording, e.g. in tests that don't set WorkerConfig.Stats).
+	stats *ServerStats
 }
 
 func NewWorker(reg *Registry, sess sessionAPI, limiter *SearchLimiter, cfg WorkerConfig, logger *log.Logger) *Worker {
@@ -84,6 +93,7 @@ func NewWorker(reg *Registry, sess sessionAPI, limiter *SearchLimiter, cfg Worke
 		fetch:    core.DownloadExtractDCCString,
 		fetchCtx: core.DownloadExtractDCCStringContext,
 		tempDir:  tempDir,
+		stats:    cfg.Stats,
 	}
 }
 
@@ -144,6 +154,22 @@ func parseQueuePosition(text string) int {
 		return 0
 	}
 	return n
+}
+
+// serverOf extracts the server token from a book's "full" string, which
+// always begins "!<server> …" (bare, Firebound %HASH%, and TrainFiles hash
+// forms all share the leading "!<server>" token). Returns "" if the string
+// doesn't have the expected shape, so callers can treat that as "no
+// attribution" rather than panicking on a malformed index.
+func serverOf(book string) string {
+	if len(book) < 2 || book[0] != '!' {
+		return ""
+	}
+	idx := strings.Index(book, " ")
+	if idx <= 1 {
+		return ""
+	}
+	return book[1:idx]
 }
 
 func drain(ch <-chan Event) {
@@ -256,6 +282,40 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 	w.reg.SetCancel(job.ID, jobCancel)
 	defer w.reg.ClearCancel(job.ID)
 
+	// attempted is only set true once the DownloadBook send succeeds, i.e.
+	// once we've actually asked a server for the book. Pre-send failures
+	// (browser_session_active, irc_connect_failed) are our-side and must
+	// not be attributed to any server, so this recorder stays a no-op for
+	// them.
+	attempted := false
+	var server string
+	var start time.Time
+	defer func() {
+		if !attempted || w.stats == nil {
+			return
+		}
+		snap, _ := w.reg.Get(job.ID)
+		// A process-shutdown cancel (jobCtx cancelled out from under a
+		// running download, not a user Cancel call) lands as StatusError
+		// with code "cancelled", not StatusCancelled. Treat both the same
+		// way: a cancel is our-side/user-side, not a server fault, and
+		// must not bump the fail streak.
+		cancelled := snap.Status == StatusCancelled ||
+			(snap.Status == StatusError && snap.Error != nil && snap.Error.Code == "cancelled")
+		switch {
+		case cancelled:
+			w.stats.RecordCancelled(server)
+		case snap.Status == StatusComplete:
+			w.stats.RecordComplete(server, time.Since(start))
+		case snap.Status == StatusError:
+			code := "error"
+			if snap.Error != nil {
+				code = snap.Error.Code
+			}
+			w.stats.RecordFailure(server, code)
+		}
+	}()
+
 	if w.cfg.BrowserConnected != nil && w.cfg.BrowserConnected() {
 		w.fail(job, "browser_session_active", nil)
 		return
@@ -279,6 +339,12 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 		w.fail(job, "irc_disconnected", err)
 		return
 	}
+	server = serverOf(job.Book)
+	start = time.Now()
+	attempted = true
+	if w.stats != nil {
+		w.stats.RecordAttempt(server)
+	}
 
 	for {
 		select {
@@ -298,6 +364,9 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 						j.QueuePosition = pos
 					}
 				})
+				if w.stats != nil && pos > 0 {
+					w.stats.RecordQueuePosition(server, pos)
+				}
 				// Liveness proof: reset the timer, bounded by cap.
 				remaining := time.Until(deadline)
 				if remaining <= 0 {

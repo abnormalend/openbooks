@@ -360,3 +360,25 @@ func TestCancelEndpoints(t *testing.T) {
 		t.Errorf("type mismatch = %d", rec.Code)
 	}
 }
+
+func TestServerStatsEndpoint(t *testing.T) {
+	a := newTestAPI(t, false)
+	// seed some stats directly
+	a.stats.RecordAttempt("DV8")
+	a.stats.RecordComplete("DV8", 3*time.Second)
+	a.stats.RecordAttempt("Bsk")
+	a.stats.RecordFailure("Bsk", "server_unavailable")
+	rec, m := call(t, a, "GET", "/server-stats", "", "tok")
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	servers := m["servers"].([]interface{})
+	if len(servers) != 2 {
+		t.Fatalf("servers = %v", servers)
+	}
+	// unauth → 401
+	rec, _ = call(t, a, "GET", "/server-stats", "", "")
+	if rec.Code != 401 {
+		t.Errorf("unauth = %d", rec.Code)
+	}
+}

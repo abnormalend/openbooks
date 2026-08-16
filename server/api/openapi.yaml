@@ -184,6 +184,34 @@ paths:
                       regularUsers: { type: array, items: { type: string } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/Disabled" }
+  /server-stats:
+    get:
+      summary: Per-server reliability stats derived from the API's own download outcomes
+      description: |
+        Passive, in-memory (v1, resets on redeploy) stats accumulated from this
+        API's own search/download job outcomes plus queue notices seen during
+        downloads — not an active probe of the servers. `online` is merged in
+        from the current NAMES presence list (same source as `/servers`).
+        `lastQueuePosition` is our own last-observed queue position at that
+        server (from an `EvQueuePosition` notice during a prior download), not
+        a live queue depth query — IRC book bots don't expose that on demand.
+        Sorted by `health` rank (`healthy` > `unknown` > `degraded` > `down`)
+        then server name; `unknown` (no attempts yet) is deliberately neutral
+        rather than penalized, so a cold-start server isn't treated as
+        unreliable just for lacking history.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items: { $ref: "#/components/schemas/ServerStat" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Disabled" }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }
@@ -297,3 +325,31 @@ components:
           type: string
           description: Pass this verbatim as `book` to POST /download
           example: "!DV8 Rebecca Yarros - Fourth Wing.epub"
+    ServerStat:
+      type: object
+      properties:
+        server: { type: string, example: DV8 }
+        online: { type: boolean, description: from the current NAMES presence list, not our history }
+        attempts: { type: integer }
+        completed: { type: integer }
+        failed: { type: integer, description: includes cancelled }
+        failuresByCode:
+          type: object
+          additionalProperties: { type: integer }
+          description: e.g. server_unavailable, timeout, dcc_failed, irc_disconnected, cancelled
+        lastQueuePosition:
+          type: integer
+          description: our last observed queue position at this server (0 = unknown); NOT a live queue depth query
+        lastQueuePositionAt: { type: string, format: date-time, nullable: true }
+        recentFailStreak: { type: integer, description: consecutive failures since the last completion; reset on complete }
+        lastSuccessAt: { type: string, format: date-time, nullable: true }
+        lastFailureAt: { type: string, format: date-time, nullable: true }
+        avgCompleteSeconds: { type: number, description: rolling average over completed downloads }
+        health:
+          type: string
+          enum: [healthy, degraded, down, unknown]
+          description: |
+            Deterministic classification: `unknown` (no attempts yet, neutral —
+            not penalized for lacking history), `down` (offline, or a fail
+            streak with no recent success), `healthy` (recent success and a
+            success rate at/above threshold), else `degraded`.

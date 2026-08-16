@@ -228,6 +228,36 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 	if len(jl["jobs"].([]interface{})) != 2 {
 		t.Errorf("jobs = %v", jl)
 	}
+
+	// Server stats reflect the completed download: the server that served
+	// it (parsed from the "full" string used above, same "!<server> …"
+	// convention as the worker's own attribution) shows a completion and a
+	// non-empty health label.
+	servedBy := strings.TrimPrefix(full, "!")
+	if idx := strings.Index(servedBy, " "); idx >= 0 {
+		servedBy = servedBy[:idx]
+	}
+	code, stats := apiReq(t, ts, "GET", "/server-stats", "")
+	if code != 200 {
+		t.Fatalf("GET /server-stats = %d %v", code, stats)
+	}
+	servers := stats["servers"].([]interface{})
+	var served map[string]interface{}
+	for _, sv := range servers {
+		m := sv.(map[string]interface{})
+		if m["server"] == servedBy {
+			served = m
+		}
+	}
+	if served == nil {
+		t.Fatalf("server-stats missing %q: %v", servedBy, servers)
+	}
+	if served["completed"].(float64) < 1 {
+		t.Errorf("%s completed = %v, want >= 1", servedBy, served["completed"])
+	}
+	if served["health"] == nil || served["health"] == "" {
+		t.Errorf("%s health = %v, want a non-empty label", servedBy, served["health"])
+	}
 }
 
 // startSlowDccServer accepts one connection and dribbles small chunks
