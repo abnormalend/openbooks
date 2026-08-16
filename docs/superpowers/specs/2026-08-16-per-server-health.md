@@ -28,6 +28,7 @@ type ServerStat struct {
     FailuresByCode      map[string]int       // server_unavailable, timeout, dcc_failed, irc_disconnected, cancelled
     LastQueuePosition   int                  // our last observed position at this server (0 = unknown)
     LastQueuePositionAt *time.Time
+    RecentFailStreak    int                  // consecutive failures since the last completion (reset on complete)
     LastSuccessAt       *time.Time
     LastFailureAt       *time.Time
     AvgCompleteSeconds  float64              // rolling over completed downloads
@@ -46,14 +47,32 @@ type ServerStat struct {
 - `fail(code)` / `EvBadServer`: `Failed++`, `FailuresByCode[code]++`, `LastFailureAt = now`. (`server_unavailable` is the strongest avoid signal.)
 - Cancellations count as `cancelled` but should be weighted lightly in health (user-initiated, not a server fault).
 
-### Health heuristic (explainable, small consts)
+### Health heuristic — pinned constants (refinement 1)
 
-- `unknown` — no attempts.
-- `down` — offline, OR the last ≥3 attempts all failed with no success in the last hour.
-- `degraded` — a recent `server_unavailable`/`timeout` mixed with successes, or success rate < ~60% over recent attempts.
-- `healthy` — recent completions dominate and last success is recent.
+Thresholds are concrete named constants so the label is deterministic and the
+table test is meaningful:
 
-Keep thresholds as named constants; the record carries the raw counts so a client can apply its own policy instead of trusting the label.
+```go
+const (
+    healthWindow        = time.Hour // "recent" success recency window
+    downFailStreak      = 3         // consecutive failures (no recent success) => down
+    degradedSuccessRate = 0.60      // success rate below this => degraded
+)
+```
+
+`RecentFailStreak` increments on every fail and resets to 0 on every complete.
+`successRate = Completed / max(1, Completed + (Failed - FailuresByCode["cancelled"]))`
+— cancellations are excluded from the denominator (weighted lightly, user-initiated).
+
+Deterministic classification (first match wins):
+- `unknown` — `Attempts == 0`.
+- `down` — `!Online`, OR (`RecentFailStreak >= downFailStreak` AND (`LastSuccessAt == nil` OR `now - LastSuccessAt > healthWindow`)).
+- `healthy` — `LastSuccessAt != nil` AND `now - LastSuccessAt <= healthWindow` AND `successRate >= degradedSuccessRate`.
+- `degraded` — has attempts but matches none of the above.
+
+The record carries the raw counts + `RecentFailStreak` alongside the label so a
+client can apply its own policy instead of trusting `Health`. `now` is injectable
+for the table test.
 
 ## Endpoint
 
@@ -62,7 +81,13 @@ Keep thresholds as named constants; the record carries the raw counts so a clien
 ## MCP (`~/openbooks-mcp`)
 
 - `server_stats()` tool → `GET /api/server-stats`.
-- Search-flow guidance: when multiple results match, prefer results whose `server` is `healthy`, avoid `down`; among ties use `lastQueuePosition` (lower = better) then reliability. Document in the skill/README.
+- Search-flow guidance: rank candidate results' servers by health with a fixed
+  order **`healthy(0) > unknown(1) > degraded(2) > down(3)`** (lower = prefer).
+  `unknown` is deliberately NEUTRAL and ranks above `degraded`/`down` — a
+  cold-start server is not penalized for having no history, otherwise the
+  folklore self-reinforces forever (refinement 2). Tie-break on
+  `lastQueuePosition` (lower better), then higher `successRate`. Document in the
+  skill/README.
 
 ## Non-goals / future
 
