@@ -295,12 +295,19 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 			return
 		}
 		snap, _ := w.reg.Get(job.ID)
-		switch snap.Status {
-		case StatusComplete:
-			w.stats.RecordComplete(server, time.Since(start))
-		case StatusCancelled:
+		// A process-shutdown cancel (jobCtx cancelled out from under a
+		// running download, not a user Cancel call) lands as StatusError
+		// with code "cancelled", not StatusCancelled. Treat both the same
+		// way: a cancel is our-side/user-side, not a server fault, and
+		// must not bump the fail streak.
+		cancelled := snap.Status == StatusCancelled ||
+			(snap.Status == StatusError && snap.Error != nil && snap.Error.Code == "cancelled")
+		switch {
+		case cancelled:
 			w.stats.RecordCancelled(server)
-		case StatusError:
+		case snap.Status == StatusComplete:
+			w.stats.RecordComplete(server, time.Since(start))
+		case snap.Status == StatusError:
 			code := "error"
 			if snap.Error != nil {
 				code = snap.Error.Code

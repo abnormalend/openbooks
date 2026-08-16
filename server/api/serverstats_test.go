@@ -17,6 +17,9 @@ func TestServerStatsHealthTable(t *testing.T) {
 		want   string
 	}{
 		{"no attempts", func(s *ServerStats) {}, map[string]bool{"A": true}, "unknown"},
+		{"attempt in flight, no outcome yet", func(s *ServerStats) {
+			s.RecordAttempt("A")
+		}, map[string]bool{"A": true}, "unknown"},
 		{"healthy recent success", func(s *ServerStats) {
 			s.RecordAttempt("A")
 			s.RecordComplete("A", 5*time.Second)

@@ -133,6 +133,21 @@ func (s *ServerStats) Snapshot(online map[string]bool) []ServerStat {
 		for k, v := range st.FailuresByCode {
 			c.FailuresByCode[k] = v
 		}
+		// Copy the *time.Time fields to fresh pointers so the snapshot
+		// never aliases the live ServerStat's pointers (mirrors the
+		// FailuresByCode deep copy above).
+		if st.LastQueuePositionAt != nil {
+			t := *st.LastQueuePositionAt
+			c.LastQueuePositionAt = &t
+		}
+		if st.LastSuccessAt != nil {
+			t := *st.LastSuccessAt
+			c.LastSuccessAt = &t
+		}
+		if st.LastFailureAt != nil {
+			t := *st.LastFailureAt
+			c.LastFailureAt = &t
+		}
 		c.Online = online[name]
 		c.Health = s.health(&c)
 		out = append(out, c)
@@ -170,7 +185,14 @@ func healthRank(h string) int {
 }
 
 func (s *ServerStats) health(c *ServerStat) string {
-	if c.Attempts == 0 {
+	// unknown means "no terminal outcome yet" — this also covers a
+	// cold-start server whose first request is still in flight
+	// (Attempts=1, Completed=0, Failed=0), not just Attempts==0. A
+	// server with a request in flight and no history must not fall
+	// through to "degraded", which the MCP ranks below "unknown" and
+	// would penalize the cold-start case the neutral-unknown ranking
+	// exists to protect.
+	if c.Completed == 0 && c.Failed == 0 {
 		return "unknown"
 	}
 	now := s.now()
@@ -180,7 +202,11 @@ func (s *ServerStats) health(c *ServerStat) string {
 	}
 	nonCancelledFail := c.Failed - c.FailuresByCode["cancelled"]
 	denom := c.Completed + nonCancelledFail
-	rate := 1.0
+	// A server with no completions and no failures never reaches this
+	// line (caught by the unknown check above), so 0.0 here is a safe,
+	// spec-aligned default that can't accidentally read as "healthy" —
+	// the healthy branch also requires recentSuccess, i.e. Completed>=1.
+	rate := 0.0
 	if denom > 0 {
 		rate = float64(c.Completed) / float64(denom)
 	}
