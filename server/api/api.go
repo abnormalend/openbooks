@@ -165,8 +165,10 @@ func (a *API) Router() chi.Router {
 		p.Use(RequireToken(a.cfg.Token))
 		p.Post("/search", a.postSearch)
 		p.Get("/search/{id}", a.getJob(JobSearch))
+		p.Delete("/search/{id}", a.cancelJob(JobSearch))
 		p.Post("/download", a.postDownload)
 		p.Get("/download/{id}", a.getJob(JobDownload))
+		p.Delete("/download/{id}", a.cancelJob(JobDownload))
 		p.Get("/jobs", a.listJobs)
 		p.Get("/servers", a.servers)
 	})
@@ -267,6 +269,34 @@ func (a *API) getJob(t JobType) http.HandlerFunc {
 		job, ok := a.reg.Get(id)
 		if !ok || job.Type != t {
 			writeError(w, 404, "job_not_found", "no such job")
+			return
+		}
+		writeJSON(w, 200, job)
+	}
+}
+
+// cancelJob handles DELETE /{search,download}/{id}: cancels a queued or
+// running job of type t. A 404 job_not_found type-guard mirrors getJob so
+// a search id can't be used to cancel a download job or vice versa.
+func (a *API) cancelJob(t JobType) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
+			writeError(w, 404, "job_not_found", "no such job")
+			return
+		}
+		// type guard: only cancel a job of the addressed type
+		if job, ok := a.reg.Get(id); !ok || job.Type != t {
+			writeError(w, 404, "job_not_found", "no such job")
+			return
+		}
+		job, apiErr := a.reg.Cancel(id)
+		if apiErr != nil {
+			status := 409
+			if apiErr.Code == "job_not_found" {
+				status = 404
+			}
+			writeError(w, status, apiErr.Code, apiErr.Message)
 			return
 		}
 		writeJSON(w, 200, job)

@@ -329,3 +329,34 @@ func TestBrowserActiveBeatsQueueFull(t *testing.T) {
 		t.Errorf("= %d %v, want 409 browser_session_active (not queue_full)", rec.Code, m)
 	}
 }
+
+func TestCancelEndpoints(t *testing.T) {
+	a := newTestAPI(t, false)
+	// queue a download, cancel it
+	_, m := call(t, a, "POST", "/download", `{"book":"!x y.epub"}`, "tok")
+	id := m["jobId"].(string)
+	rec, cm := call(t, a, "DELETE", "/download/"+id, "", "tok")
+	if rec.Code != 200 || cm["status"] != "cancelled" {
+		t.Fatalf("cancel = %d %v", rec.Code, cm)
+	}
+	// second cancel → not_cancellable
+	rec, cm = call(t, a, "DELETE", "/download/"+id, "", "tok")
+	if rec.Code != 409 || cm["code"] != "not_cancellable" {
+		t.Errorf("re-cancel = %d %v", rec.Code, cm)
+	}
+	// unknown → 404
+	rec, _ = call(t, a, "DELETE", "/download/00000000-0000-0000-0000-000000000000", "", "tok")
+	if rec.Code != 404 {
+		t.Errorf("unknown = %d", rec.Code)
+	}
+	// unauth → 401
+	rec, _ = call(t, a, "DELETE", "/download/"+id, "", "")
+	if rec.Code != 401 {
+		t.Errorf("unauth = %d", rec.Code)
+	}
+	// type mismatch (search id space) → 404
+	rec, _ = call(t, a, "DELETE", "/search/"+id, "", "tok")
+	if rec.Code != 404 {
+		t.Errorf("type mismatch = %d", rec.Code)
+	}
+}
