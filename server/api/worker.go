@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/evan-buss/openbooks/core"
@@ -118,6 +120,22 @@ func (w *Worker) fail(job *Job, code string, err error) {
 	w.reg.Finish(job, &APIError{Code: code, Message: msg})
 }
 
+var queuePosRe = regexp.MustCompile(`(?i)queue\s*position[^0-9]*([0-9]+)`)
+
+// parseQueuePosition extracts the integer queue position from a bot notice,
+// or 0 if none is present.
+func parseQueuePosition(text string) int {
+	m := queuePosRe.FindStringSubmatch(text)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func drain(ch <-chan Event) {
 	for {
 		select {
@@ -217,14 +235,21 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 		return
 	}
 	drain(w.sess.DownloadEvents())
+
+	// Arm the timer BEFORE the send: DownloadBook does a socket write which,
+	// even with the irc write deadline, we never want to precede the timeout
+	// bound. deadline is the absolute cap; queue notices reset the timer but
+	// can't push total wait past cap.
+	timer := time.NewTimer(w.cfg.DownloadTimeout)
+	defer timer.Stop()
+	deadline := time.Now().Add(2 * w.cfg.DownloadTimeout)
+
 	w.log.Printf("download job %s: requesting %q", job.ID, job.Book)
 	if err := w.sess.DownloadBook(job.Book); err != nil {
 		w.fail(job, "irc_disconnected", err)
 		return
 	}
 
-	timer := time.NewTimer(w.cfg.DownloadTimeout)
-	defer timer.Stop()
 	for {
 		select {
 		case ev := <-w.sess.DownloadEvents():
@@ -235,6 +260,31 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 			case EvBadServer:
 				w.fail(job, "server_unavailable", nil)
 				return
+			case EvQueuePosition:
+				pos := parseQueuePosition(ev.Text)
+				w.log.Printf("download job %s: queued at position %d", job.ID, pos)
+				w.reg.Update(job, func(j *Job) {
+					if pos > 0 {
+						j.QueuePosition = pos
+					}
+				})
+				// Liveness proof: reset the timer, bounded by cap.
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					w.fail(job, "timeout", nil)
+					return
+				}
+				next := w.cfg.DownloadTimeout
+				if remaining < next {
+					next = remaining
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(next)
 			case EvDisconnected:
 				w.fail(job, "irc_disconnected", nil)
 				return

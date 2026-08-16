@@ -491,3 +491,72 @@ func TestDownloadJobFailsWhenSendFails(t *testing.T) {
 		t.Errorf("error = %+v, want irc_disconnected", snap.Error)
 	}
 }
+
+func TestDownloadRecordsQueuePositionThenCompletes(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+		p := filepath.Join(baseDir, "gatsby.epub")
+		os.MkdirAll(baseDir, 0o755)
+		os.WriteFile(p, []byte("x"), 0o644)
+		return p, nil
+	}
+	// queue notice first, then the DCC offer — both delivered when DownloadBook is called
+	sess.downloadReply = []Event{
+		{Kind: EvQueuePosition, Text: "Added to queueposition 5."},
+		{Kind: EvBookResult, Text: "DCC SEND gatsby.epub 2130706433 6669 1"},
+	}
+	job := NewDownloadJob("!DV8 book.epub")
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusComplete)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if snap.QueuePosition != 5 {
+		t.Errorf("QueuePosition = %d, want 5", snap.QueuePosition)
+	}
+}
+
+func TestQueuePositionResetsTimerButCapBounds(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	// Very short base timeout; only ever send queue notices, never a book.
+	w.cfg.DownloadTimeout = 40 * time.Millisecond
+	// Emit several queue notices to exercise the reset, then go silent.
+	sess.downloadReply = []Event{
+		{Kind: EvQueuePosition, Text: "queueposition 9"},
+		{Kind: EvQueuePosition, Text: "queueposition 8"},
+	}
+	job := NewDownloadJob("!DV8 book.epub")
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	// Must still terminate at the cap (2x=80ms) even though queue notices reset the timer.
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "timeout" {
+		t.Errorf("error = %+v, want timeout", snap.Error)
+	}
+	if snap.QueuePosition != 8 {
+		t.Errorf("QueuePosition = %d, want 8 (last seen)", snap.QueuePosition)
+	}
+}
+
+func TestParseQueuePosition(t *testing.T) {
+	cases := map[string]int{
+		"Added Fourth Wing to queueposition 5.":    5,
+		"you are now in queue position 12 for foo": 12,
+		"QUEUEPOSITION 1":                          1,
+		"no number here":                           0,
+	}
+	for in, want := range cases {
+		if got := parseQueuePosition(in); got != want {
+			t.Errorf("parseQueuePosition(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
