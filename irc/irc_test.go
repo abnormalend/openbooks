@@ -3,6 +3,7 @@ package irc
 import (
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -10,9 +11,11 @@ import (
 // fakeNetConn satisfies net.Conn with in-memory read input and a buffer
 // capturing every Write. Read returns io.EOF when input is exhausted.
 type fakeNetConn struct {
-	in     []byte
-	out    []byte
-	closed bool
+	in             []byte
+	out            []byte
+	closed         bool
+	writeDeadlines int
+	writeErr       error
 }
 
 func (f *fakeNetConn) Read(p []byte) (int, error) {
@@ -28,16 +31,19 @@ func (f *fakeNetConn) Write(p []byte) (int, error) {
 	if f.closed {
 		return 0, io.ErrClosedPipe
 	}
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
 	f.out = append(f.out, p...)
 	return len(p), nil
 }
 
-func (f *fakeNetConn) Close() error                       { f.closed = true; return nil }
-func (f *fakeNetConn) LocalAddr() net.Addr                { return nil }
-func (f *fakeNetConn) RemoteAddr() net.Addr               { return nil }
-func (f *fakeNetConn) SetDeadline(time.Time) error        { return nil }
-func (f *fakeNetConn) SetReadDeadline(time.Time) error    { return nil }
-func (f *fakeNetConn) SetWriteDeadline(time.Time) error   { return nil }
+func (f *fakeNetConn) Close() error                     { f.closed = true; return nil }
+func (f *fakeNetConn) LocalAddr() net.Addr              { return nil }
+func (f *fakeNetConn) RemoteAddr() net.Addr             { return nil }
+func (f *fakeNetConn) SetDeadline(time.Time) error      { return nil }
+func (f *fakeNetConn) SetReadDeadline(time.Time) error  { return nil }
+func (f *fakeNetConn) SetWriteDeadline(time.Time) error { f.writeDeadlines++; return nil }
 
 func newTestConn() (*Conn, *fakeNetConn) {
 	f := &fakeNetConn{}
@@ -127,4 +133,25 @@ func TestWritesAreNoopWhenDisconnected(t *testing.T) {
 	c.GetUsers("ebooks")
 	c.Pong("server")
 	c.Disconnect()
+}
+
+func TestWriteSetsDeadlineBeforeWriting(t *testing.T) {
+	c, f := newTestConn()
+	c.SendMessage("hello")
+	if f.writeDeadlines == 0 {
+		t.Fatal("expected SendMessage to set a write deadline before writing")
+	}
+	if len(f.out) == 0 {
+		t.Fatal("expected bytes written")
+	}
+}
+
+func TestWriteReturnsErrorWhenDeadlineExceeded(t *testing.T) {
+	c, f := newTestConn()
+	f.writeErr = os.ErrDeadlineExceeded // simulate a wedged socket hitting the deadline
+	n, err := c.Write([]byte("PING\r\n"))
+	if err == nil {
+		t.Fatal("expected Write to surface the deadline error")
+	}
+	_ = n
 }
