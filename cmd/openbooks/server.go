@@ -4,6 +4,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"time"
 
 	"github.com/evan-buss/openbooks/server"
 	"github.com/evan-buss/openbooks/util"
@@ -24,6 +25,10 @@ func init() {
 	serverCmd.Flags().BoolVarP(&openBrowser, "browser", "b", false, "Open the browser on server start.")
 	serverCmd.Flags().BoolVar(&serverConfig.Persist, "persist", false, "Persist eBooks in 'dir'. Default is to delete after sending.")
 	serverCmd.Flags().StringVarP(&serverConfig.DownloadDir, "dir", "d", filepath.Join(os.TempDir(), "openbooks"), "The directory where eBooks are saved when persist enabled.")
+	serverCmd.Flags().StringVar(&serverConfig.APIToken, "api-token", "", "Bearer token for the REST API under <basepath>api/. Falls back to $OPENBOOKS_API_TOKEN. Empty disables the API.")
+	serverCmd.Flags().DurationVar(&serverConfig.APIIdleTimeout, "api-idle-timeout", 5*time.Minute, "Disconnect the API's IRC session after this long with no jobs.")
+	serverCmd.Flags().DurationVar(&serverConfig.SearchJobTimeout, "search-job-timeout", 2*time.Minute, "Fail an API search job if the bot hasn't answered within this long.")
+	serverCmd.Flags().DurationVar(&serverConfig.DownloadJobTimeout, "download-job-timeout", 10*time.Minute, "Fail an API download job if the bot hasn't offered the file within this long.")
 }
 
 var serverCmd = &cobra.Command{
@@ -42,6 +47,7 @@ var serverCmd = &cobra.Command{
 			}
 		}
 		serverConfig.Basepath = sanitizePath(serverConfig.Basepath)
+		serverConfig.APIToken = resolveAPIToken(serverConfig.APIToken)
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		if openBrowser {

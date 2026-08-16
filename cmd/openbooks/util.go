@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path"
 	"time"
 
@@ -15,6 +16,7 @@ func bindGlobalServerFlags(config *server.Config) {
 	config.Server = globalFlags.Server
 	config.SearchBot = globalFlags.SearchBot
 	config.EnableTLS = globalFlags.EnableTLS
+	config.Version = version
 }
 
 // Make sure the server config has a valid rate limit.
@@ -34,4 +36,12 @@ func sanitizePath(basepath string) string {
 		return cleaned
 	}
 	return cleaned + "/"
+}
+
+// resolveAPIToken prefers the --api-token flag, then OPENBOOKS_API_TOKEN.
+func resolveAPIToken(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("OPENBOOKS_API_TOKEN")
 }

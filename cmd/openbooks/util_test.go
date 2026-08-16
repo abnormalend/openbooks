@@ -45,3 +45,17 @@ func TestEnsureValidRateFloorsAtTen(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveAPIToken(t *testing.T) {
+	t.Setenv("OPENBOOKS_API_TOKEN", "from-env")
+	if got := resolveAPIToken(""); got != "from-env" {
+		t.Errorf("empty flag → %q, want env value", got)
+	}
+	if got := resolveAPIToken("from-flag"); got != "from-flag" {
+		t.Errorf("flag set → %q, want flag value", got)
+	}
+	t.Setenv("OPENBOOKS_API_TOKEN", "")
+	if got := resolveAPIToken(""); got != "" {
+		t.Errorf("neither → %q, want empty", got)
+	}
+}
