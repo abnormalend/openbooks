@@ -20,15 +20,19 @@ These options apply to both Server and CLI mode.
 
 ## Server Mode Options
 
-| Flag                     | Default     | Description                                               |
-|--------------------------|-------------|-----------------------------------------------------------|
-| `--basepath`             | `/`         | Web UI Path. Must have trailing `/`. (Ex. `/openbooks/`)  |
-| `--browser`/`-b`         | `false`     | Open the browser on startup.                              |
-| `--dir`/`-d`             | `/temp`[^1] | Directory where search results and eBooks are saved.      |
-| `--no-browser-downloads` | `false`     | Don't send files to browser but save them to disk.        |
-| `--persist`              | `false`     | Save eBook files after sending to browser.                |
-| `--port`/`-p`            | `5228`      | The port that the server listens on.                      |
-| `--rate-limit`/`-r`      | `10`        | Seconds to wait between IRC search requests. (minimum 10) |
+| Flag                      | Default     | Description                                               |
+|---------------------------|-------------|-----------------------------------------------------------|
+| `--api-idle-timeout`      | `5m`        | Disconnect the API's IRC session after this long with no jobs. |
+| `--api-token`             | *(unset)*   | Bearer token for the REST API. Falls back to `$OPENBOOKS_API_TOKEN`. Unset disables the API. See [REST API](api.md). |
+| `--basepath`              | `/`         | Web UI Path. Must have trailing `/`. (Ex. `/openbooks/`)  |
+| `--browser`/`-b`          | `false`     | Open the browser on startup.                              |
+| `--dir`/`-d`              | `/temp`[^1] | Directory where search results and eBooks are saved.      |
+| `--download-job-timeout`  | `10m`       | Fail an API download job if the bot hasn't offered the file in time. |
+| `--no-browser-downloads`  | `false`     | Don't send files to browser but save them to disk.        |
+| `--persist`               | `false`     | Save eBook files after sending to browser.                |
+| `--port`/`-p`             | `5228`      | The port that the server listens on.                      |
+| `--rate-limit`/`-r`       | `10`        | Seconds to wait between IRC search requests. (minimum 10) |
+| `--search-job-timeout`    | `2m`        | Fail an API search job if the bot hasn't answered in time. |
 
 ## CLI Mode Options
 

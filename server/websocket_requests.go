@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/evan-buss/openbooks/core"
 	"github.com/evan-buss/openbooks/util"
@@ -81,20 +80,12 @@ func (c *Client) startIrcConnection(server *server) {
 
 // handle SearchRequests and send the query to the book server
 func (c *Client) sendSearchRequest(s *SearchRequest, server *server) {
-	server.lastSearchMutex.Lock()
-	defer server.lastSearchMutex.Unlock()
-
-	nextAvailableSearch := server.lastSearch.Add(server.config.SearchTimeout)
-
-	if time.Now().Before(nextAvailableSearch) {
-		remainingSeconds := time.Until(nextAvailableSearch).Seconds()
-		c.send <- newRateLimitResponse(remainingSeconds)
-
+	if wait, ok := server.searchLimiter.TryAcquire(); !ok {
+		c.send <- newRateLimitResponse(wait.Seconds())
 		return
 	}
 
 	core.SearchBook(c.irc, server.config.SearchBot, s.Query)
-	server.lastSearch = time.Now()
 
 	c.send <- newStatusResponse(NOTIFY, "Search request sent.")
 }

@@ -17,12 +17,14 @@ HTTP + websocket server that powers OpenBooks' web UI. Hosts the embedded React 
 | `websocket_requests.go` | `routeMessage` switch over inbound websocket payload types; per-client handlers for connect/search/download (including rate-limit check). |
 | `irc_events.go` | `NewIrcEventHandler` and per-event callbacks that translate `core` events into outbound websocket messages. |
 | `middlewares.go` | `requireUser` middleware (validates the `OpenBooks` cookie + UUID) and `getClient`/`getUUID` helpers. |
-| `repository.go` | Process-level shared state (currently just the cached IRC server list). |
+| `repository.go` | Process-level shared state (the cached IRC server list). `Servers()`/`SetServers()` are RWMutex-guarded — safe for concurrent reads from the websocket path and the API. |
+| `routes_test.go` | `httptest`-based coverage of route mounting, auth, and the browser/API mutual-exclusion handshake. |
 
 ## Subdirectories
 | Directory | Purpose |
 |-----------|---------|
 | `app/` | React + Vite frontend; built into `app/dist/` and embedded into the binary (see `app/AGENTS.md`) |
+| `api/` | REST API package — see `api/AGENTS.md` |
 
 ## For AI Agents
 
@@ -31,12 +33,15 @@ HTTP + websocket server that powers OpenBooks' web UI. Hosts the embedded React 
 - `serveWs` rejects new connections when there is already a client (`len(server.clients) > 0`) — OpenBooks is single-user by design. Don't lift this without rethinking the IRC connection model (see `docs/docs/developers/architecture.md` for the future plan).
 - Cookies: the `OpenBooks` cookie holds a UUID (HttpOnly, SameSite=Strict, 7d expiry). The `requireUser` middleware reads it for REST routes; `serveWs` issues it on first connect.
 - `MessageType` constants are mirrored in `app/src/state/messages.ts` — keep the integer ordering in lockstep, and regenerate `messagetype_string.go` (`go generate ./server/...`) after changes.
-- Search rate limiting is enforced server-side via `lastSearchMutex` + `config.SearchTimeout`; the client also has a sense of it via the `RATELIMIT` response.
 - CORS allows only `http://127.0.0.1:5173` (Vite dev server) — the production build is same-origin so it doesn't need CORS. If you change the dev port, update both ends.
 - "Persist" off means downloaded books are deleted right after `http.ServeFile` streams them to the browser (`getBookHandler`).
+- `serveWs` now calls `server.api.Yield()` before upgrading — the API and the browser share one IRC nick and are mutually exclusive.
+- Search rate limiting moved to `api.SearchLimiter` (`server.searchLimiter`), shared by the websocket path and the API worker.
+- `NewHandler(ctx, config)` builds the router without listening; use it in tests.
 
 ### Testing Requirements
-- No Go tests today. Exercise via `task dev:server` against `task dev:mock`, then drive the React app at `http://localhost:5228/`.
+- `go test -race ./server/...`; `routes_test.go` covers mounting/auth/mutual-exclusion via `httptest`.
+- Exercise via `task dev:server` against `task dev:mock`, then drive the React app at `http://localhost:5228/`.
 
 ### Common Patterns
 - All outbound websocket messages are constructed via the `new*Response` helpers in `messages.go` so titles/notification types stay consistent.

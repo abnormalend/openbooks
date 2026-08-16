@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,6 +15,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/rs/cors"
+
+	"github.com/evan-buss/openbooks/server/api"
 )
 
 type server struct {
@@ -35,11 +37,16 @@ type server struct {
 
 	log *log.Logger
 
-	// Mutex to guard the lastSearch timestamp
-	lastSearchMutex sync.Mutex
+	// Rate limits searches across the browser client and the API worker.
+	searchLimiter *api.SearchLimiter
 
-	// The time the last search was performed. Used to rate limit searches.
-	lastSearch time.Time
+	// REST API façade (mounted at <basepath>api).
+	api *api.API
+
+	// clientCount mirrors len(clients) without needing the hub goroutine;
+	// read from other goroutines (serveWs, the API's BrowserConnected
+	// check) that must not touch the clients map directly.
+	clientCount atomic.Int32
 }
 
 // Config contains settings for server
@@ -56,21 +63,60 @@ type Config struct {
 	SearchBot               string
 	DisableBrowserDownloads bool
 	UserAgent               string
+
+	// REST API (server/api). Empty APIToken disables the API (503s).
+	APIToken           string
+	APIIdleTimeout     time.Duration
+	SearchJobTimeout   time.Duration
+	DownloadJobTimeout time.Duration
+	// Version is reported by /api/health.
+	Version string
 }
 
 func New(config Config) *server {
-	return &server{
-		repository: NewRepository(),
-		config:     &config,
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		clients:    make(map[uuid.UUID]*Client),
-		log:        log.New(os.Stdout, "SERVER: ", log.LstdFlags|log.Lmsgprefix),
+	s := &server{
+		repository:    NewRepository(),
+		config:        &config,
+		register:      make(chan *Client),
+		unregister:    make(chan *Client),
+		clients:       make(map[uuid.UUID]*Client),
+		log:           log.New(os.Stdout, "SERVER: ", log.LstdFlags|log.Lmsgprefix),
+		searchLimiter: api.NewSearchLimiter(config.SearchTimeout),
 	}
+	logDir := ""
+	if config.Log {
+		logDir = config.DownloadDir
+	}
+	s.api = api.New(api.Config{
+		Token:           config.APIToken,
+		Version:         config.Version,
+		BasePath:        config.Basepath,
+		DownloadDir:     config.DownloadDir,
+		IdleTimeout:     config.APIIdleTimeout,
+		SearchTimeout:   config.SearchJobTimeout,
+		DownloadTimeout: config.DownloadJobTimeout,
+		Session: api.SessionConfig{
+			Nick:      config.UserName,
+			UserAgent: config.UserAgent,
+			Server:    config.Server,
+			TLS:       config.EnableTLS,
+			SearchBot: config.SearchBot,
+			LogDir:    logDir,
+		},
+	}, api.Deps{
+		Limiter:          s.searchLimiter,
+		BrowserConnected: func() bool { return s.clientCount.Load() > 0 },
+		Servers:          s.repository.Servers,
+		OnServerList:     s.repository.SetServers,
+		Log:              log.New(os.Stdout, "API: ", log.LstdFlags|log.Lmsgprefix),
+	})
+	return s
 }
 
-// Start instantiates the web server and opens the browser
-func Start(config Config) {
+// NewHandler builds the full HTTP handler (SPA, websocket, legacy REST and
+// the /api group mounted under config.Basepath) and starts the background
+// goroutines bound to ctx. Start wraps it; tests drive it via httptest.
+func NewHandler(ctx context.Context, config Config) http.Handler {
 	createBooksDirectory(config)
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -81,23 +127,36 @@ func Start(config Config) {
 		AllowCredentials: true,
 		AllowedOrigins:   []string{"http://127.0.0.1:5173"},
 		AllowedHeaders:   []string{"*"},
-		AllowedMethods:   []string{"GET", "DELETE"},
+		AllowedMethods:   []string{"GET", "POST", "DELETE"},
 	}
 	router.Use(cors.New(corsConfig).Handler)
 
 	server := New(config)
 	routes := server.registerRoutes()
 
-	ctx, cancel := context.WithCancel(context.Background())
 	go server.startClientHub(ctx)
-	server.registerGracefulShutdown(cancel)
+	server.api.Start(ctx)
 	router.Mount(config.Basepath, routes)
 
 	server.log.Printf("Base Path: %s\n", config.Basepath)
-	server.log.Printf("OpenBooks is listening on port %v", config.Port)
 	server.log.Printf("Download Directory: %s\n", config.DownloadDir)
-	server.log.Printf("Open http://localhost:%v%s in your browser.", config.Port, config.Basepath)
-	server.log.Fatal(http.ListenAndServe(":"+config.Port, router))
+	if config.APIToken == "" {
+		server.log.Println("REST API disabled (no --api-token / OPENBOOKS_API_TOKEN)")
+	} else {
+		server.log.Printf("REST API enabled at %sapi/\n", config.Basepath)
+	}
+	return router
+}
+
+// Start instantiates the web server and blocks.
+func Start(config Config) {
+	ctx, cancel := context.WithCancel(context.Background())
+	router := NewHandler(ctx, config)
+	registerGracefulShutdown(cancel)
+
+	log.Printf("SERVER: OpenBooks is listening on port %v", config.Port)
+	log.Printf("SERVER: Open http://localhost:%v%s in your browser.", config.Port, config.Basepath)
+	log.Fatal(http.ListenAndServe(":"+config.Port, router))
 }
 
 // The client hub is to be run in a goroutine and handles management of
@@ -107,12 +166,14 @@ func (server *server) startClientHub(ctx context.Context) {
 		select {
 		case client := <-server.register:
 			server.clients[client.uuid] = client
+			server.clientCount.Add(1)
 		case client := <-server.unregister:
 			if _, ok := server.clients[client.uuid]; ok {
 				_, cancel := context.WithCancel(client.ctx)
 				close(client.send)
 				cancel()
 				delete(server.clients, client.uuid)
+				server.clientCount.Add(-1)
 			}
 		case <-ctx.Done():
 			for _, client := range server.clients {
@@ -120,18 +181,19 @@ func (server *server) startClientHub(ctx context.Context) {
 				close(client.send)
 				cancel()
 				delete(server.clients, client.uuid)
+				server.clientCount.Add(-1)
 			}
 			return
 		}
 	}
 }
 
-func (server *server) registerGracefulShutdown(cancel context.CancelFunc) {
+func registerGracefulShutdown(cancel context.CancelFunc) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		server.log.Println("Graceful shutdown.")
+		log.Println("SERVER: Graceful shutdown.")
 		// Close the shutdown channel. Triggering all reader/writer WS handlers to close.
 		cancel()
 		time.Sleep(time.Second)

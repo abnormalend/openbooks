@@ -37,6 +37,12 @@ OpenBooks server doesn't have to be hosted at the root of your webserver. The ba
 - Binary
   - `./openbooks server --basepath /openbooks/`
 
+### REST API
+
+Server mode can also expose a token-protected REST API (`--api-token` /
+`OPENBOOKS_API_TOKEN`) for scripted search → download flows — see
+[docs/docs/api.md](docs/docs/api.md). Unset, the API is disabled.
+
 ## Usage
 
 For a complete list of features use the `--help` flags on all subcommands.
