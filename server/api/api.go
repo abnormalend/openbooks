@@ -56,6 +56,7 @@ type API struct {
 	reg     *Registry
 	sess    *Session
 	worker  *Worker
+	stats   *ServerStats
 	started time.Time
 	once    sync.Once
 }
@@ -87,14 +88,16 @@ func New(cfg Config, deps Deps) *API {
 	}
 	reg := NewRegistry(cfg.QueueDepth, cfg.JobTTL)
 	sess := NewSession(cfg.Session, deps.Log, deps.OnServerList)
+	stats := NewServerStats()
 	worker := NewWorker(reg, sess, deps.Limiter, WorkerConfig{
 		DownloadDir:      cfg.DownloadDir,
 		LibrarySubdir:    cfg.LibrarySubdir,
 		SearchTimeout:    cfg.SearchTimeout,
 		DownloadTimeout:  cfg.DownloadTimeout,
 		BrowserConnected: deps.BrowserConnected,
+		Stats:            stats,
 	}, deps.Log)
-	return &API{cfg: cfg, deps: deps, reg: reg, sess: sess, worker: worker, started: time.Now()}
+	return &API{cfg: cfg, deps: deps, reg: reg, sess: sess, worker: worker, stats: stats, started: time.Now()}
 }
 
 // Start launches the workers, the TTL sweeper and the idle watcher.
