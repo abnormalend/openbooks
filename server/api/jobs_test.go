@@ -252,3 +252,37 @@ func TestCancelUnknownAndTerminal(t *testing.T) {
 		t.Errorf("terminal: %+v", e)
 	}
 }
+
+func TestCancelMarkerClearedOnFinish(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	job := NewDownloadJob("!x")
+	r.Enqueue(job)
+	r.Next(context.Background(), JobDownload)
+	r.SetCancel(job.ID, func() {})
+	r.Finish(job, nil)
+	if r.WasCancelled(job.ID) {
+		t.Error("WasCancelled should be false after Finish")
+	}
+	r.mu.Lock()
+	_, hasCancel := r.cancels[job.ID]
+	_, hasCancelled := r.cancelled[job.ID]
+	r.mu.Unlock()
+	if hasCancel || hasCancelled {
+		t.Errorf("cancels/cancelled maps not pruned after Finish: cancel=%v cancelled=%v", hasCancel, hasCancelled)
+	}
+}
+
+func TestSetCancelHonorsAlreadyCancelled(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	job := NewDownloadJob("!x")
+	r.Enqueue(job)
+	r.Next(context.Background(), JobDownload) // marks running; SetCancel not yet called (simulates the TOCTOU window)
+	if _, e := r.Cancel(job.ID); e != nil {
+		t.Fatalf("cancel: %+v", e)
+	}
+	called := false
+	r.SetCancel(job.ID, func() { called = true })
+	if !called {
+		t.Error("SetCancel should immediately invoke fn for an already-cancelled job")
+	}
+}

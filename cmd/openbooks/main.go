@@ -65,6 +65,7 @@ var desktopCmd = &cobra.Command{
 		desktopConfig.DisableBrowserDownloads = true
 		desktopConfig.Basepath = "/"
 		desktopConfig.Persist = true
+		desktopConfig.LibrarySubdir = "books"
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		if debug {

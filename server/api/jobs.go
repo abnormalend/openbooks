@@ -197,11 +197,19 @@ func (r *Registry) Next(ctx context.Context, t JobType) *Job {
 	}
 }
 
-// SetCancel registers a running job's cancel func. ClearCancel removes it.
+// SetCancel registers a running job's cancel func. If Cancel already ran
+// against this id while it was between Next (marking it running) and this
+// call — the TOCTOU window where no cancel func was registered yet — fn is
+// invoked immediately so the cancel isn't silently dropped. ClearCancel
+// removes the registration.
 func (r *Registry) SetCancel(id uuid.UUID, fn context.CancelFunc) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.cancels[id] = fn
+	already := r.cancelled[id]
+	r.mu.Unlock()
+	if already {
+		fn() // a Cancel landed before we registered; honor it now
+	}
 }
 
 func (r *Registry) ClearCancel(id uuid.UUID) {
@@ -261,6 +269,7 @@ func (r *Registry) FinishCancelled(job *Job) {
 	job.FinishedAt = &now
 	r.lastFinished = now
 	delete(r.cancels, job.ID)
+	delete(r.cancelled, job.ID)
 }
 
 // Update mutates a job under the registry lock.
@@ -271,6 +280,10 @@ func (r *Registry) Update(job *Job, fn func(*Job)) {
 }
 
 // Finish marks the job terminal: complete when err is nil, error otherwise.
+// Also clears any cancel bookkeeping: a cancel can race in just after a
+// job's own successful/failed finish (e.g. the fetch completed right
+// before Cancel's fn() call landed) — the finish that got there first
+// wins, but the markers must not linger past it.
 func (r *Registry) Finish(job *Job, err *APIError) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -283,6 +296,8 @@ func (r *Registry) Finish(job *Job, err *APIError) {
 		job.Status = StatusComplete
 	}
 	r.lastFinished = now
+	delete(r.cancels, job.ID)
+	delete(r.cancelled, job.ID)
 }
 
 // Get returns a snapshot copy of the job. The copy is shallow: slice and
@@ -363,6 +378,8 @@ func (r *Registry) Sweep() {
 	for id, job := range r.jobs {
 		if job.FinishedAt != nil && job.FinishedAt.Before(cutoff) {
 			delete(r.jobs, id)
+			delete(r.cancels, id)
+			delete(r.cancelled, id)
 		}
 	}
 }
