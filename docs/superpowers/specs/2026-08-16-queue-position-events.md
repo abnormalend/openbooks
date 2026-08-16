@@ -136,3 +136,46 @@ mirror `~/portainer-stacks/books.yaml` (branch `compute2`).
 3. Confirm raw IRC log file appears under `/mnt/nfs/booklore/bookdrop/logs/`.
 4. Simulate a wedged bot (stop the DCC offer) and confirm the job fails with
    `timeout`/`irc_disconnected` at the bound instead of hanging.
+
+---
+
+## Refinements (2026-08-16, before implementation)
+
+Adopted after verifying the diagnosis against the code. These override the
+corresponding paragraphs above where they differ.
+
+1. **Write deadline is the primary hang fix; timer-before-send is secondary.**
+   `irc.Conn` embeds `net.Conn`, so `i.Write` is the promoted `net.Conn.Write`
+   with no deadline. Add an override `func (i *Conn) Write(b []byte) (int, error)`
+   that calls `i.Conn.SetWriteDeadline(now + writeTimeout)` (writeTimeout = 30s)
+   then `i.Conn.Write(b)`. This shadows the promoted method for *every* Conn
+   write (USER/NICK/JOIN/PRIVMSG/NOTICE/PONG/QUIT), so a wedged socket errors
+   out within 30s instead of blocking forever. **This write path is shared with
+   the browser websocket client**, not API-only — the deadline applies to both
+   sessions (intended; 30s is generous for a single line). Reads are unaffected
+   (no `Read` override; the scanner keeps using the promoted `net.Conn.Read`).
+   `doDownload` also arms its `DownloadTimeout` timer *before* the send as
+   defense-in-depth, but with the deadline the send can no longer hang.
+
+2. **Detect `queueposition` for both NOTICE and PRIVMSG forms.** Bots send the
+   queue line as either. Put the detection at the top level, above the existing
+   `NOTICE` branch (a queue line never contains `DCC SEND`, so it sits between
+   the DCC-SEND check and the NOTICE check). Match case-insensitively on
+   `queueposition` or `queue position`. A NOTICE-form queue line thus classifies
+   as `QueuePosition` before entering the NOTICE sub-branch; a PRIVMSG-form line
+   is caught by the same check.
+
+3. **`--log` output location.** `util.CreateLogFile` writes to
+   `<DownloadDir>/logs/`, which for this deploy is
+   `/mnt/nfs/booklore/bookdrop/logs/` — inside the volume BookLore/Grimmory
+   watches. BookLore imports ebook files, not a `logs/` subdir, so this is
+   safe but slightly untidy; acceptable for now. The `--log` flag is a
+   deploy/compose change handled during rollout, not in the code PR.
+
+### Timer handling detail
+
+On `EvQueuePosition` the worker records `job.QueuePosition` and **resets** the
+download timer (the bot proved liveness), but bounded: an absolute cap of
+`2 × DownloadTimeout` from job start. If resetting would exceed the cap, clamp
+the reset so the job still fails at the cap. A bot that queues us and then dies
+therefore fails at ~2× the timeout, not never.
