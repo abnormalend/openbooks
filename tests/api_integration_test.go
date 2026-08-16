@@ -130,6 +130,7 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 	handler := server.NewHandler(ctx, server.Config{
 		Basepath:           "/",
 		DownloadDir:        dir,
+		LibrarySubdir:      "books",
 		Persist:            true,
 		SearchTimeout:      10 * time.Second,
 		UserName:           "tester",
@@ -220,5 +221,148 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 	_, jl := apiReq(t, ts, "GET", "/jobs", "")
 	if len(jl["jobs"].([]interface{})) != 2 {
 		t.Errorf("jobs = %v", jl)
+	}
+}
+
+// startSlowDccServer accepts one connection and dribbles small chunks
+// forever (until the connection is closed by the reader or by stop), used
+// to simulate an in-flight DCC transfer that never finishes on its own so
+// a test can exercise cancelling it mid-transfer.
+func startSlowDccServer(t *testing.T) (port string, stop func()) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen slow dcc: %v", err)
+	}
+	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 64)
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+			if _, err := conn.Write(buf); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	return fmt.Sprintf("%d", l.Addr().(*net.TCPAddr).Port), func() {
+		close(stopCh)
+		l.Close()
+		wg.Wait()
+	}
+}
+
+// TestAPICancelDownload starts a download whose DCC transfer announces a
+// large size but only ever dribbles bytes in slowly, then cancels it via
+// DELETE /api/download/{id} and asserts it finalizes as "cancelled" (not
+// "complete"/"error") promptly, and that the download queue frees up.
+func TestAPICancelDownload(t *testing.T) {
+	bookPort, stopBook := startSlowDccServer(t)
+	defer stopBook()
+
+	// A large announced size the slow server could never deliver within
+	// the test's bound, so the only way this job finishes is cancellation.
+	const announcedSize = 50 * 1024 * 1024
+	ircAddr, stopIrc := startApiIrcServer(t, "0", 0, bookPort, announcedSize)
+	defer stopIrc()
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := server.NewHandler(ctx, server.Config{
+		Basepath:           "/",
+		DownloadDir:        dir,
+		LibrarySubdir:      "books",
+		Persist:            true,
+		SearchTimeout:      10 * time.Second,
+		UserName:           "tester",
+		UserAgent:          "OpenBooks integration",
+		Server:             ircAddr,
+		EnableTLS:          false,
+		SearchBot:          "search",
+		APIToken:           "integration-token",
+		SearchJobTimeout:   10 * time.Second,
+		DownloadJobTimeout: 10 * time.Second,
+		Version:            "it",
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	code, m := apiReq(t, ts, "POST", "/download", `{"book":"!DV8 slow-book.epub"}`)
+	if code != 202 {
+		t.Fatalf("POST /download = %d %v", code, m)
+	}
+	id := m["jobId"].(string)
+
+	// Wait for the job to actually be running (mid-transfer) before
+	// cancelling, so this exercises the running-job cancel path rather
+	// than the queued one.
+	runningDeadline := time.Now().Add(5 * time.Second)
+	for {
+		code, dj := apiReq(t, ts, "GET", "/download/"+id, "")
+		if code != 200 {
+			t.Fatalf("GET /download/%s = %d %v", id, code, dj)
+		}
+		if dj["status"] == "running" {
+			break
+		}
+		if time.Now().After(runningDeadline) {
+			t.Fatalf("download job never reached running: %v", dj)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Cancel returns immediately; for a running job the worker hasn't
+	// necessarily finalized it yet (that happens asynchronously once it
+	// observes jobCtx.Done()), so the response can still show "running" —
+	// the poll loop below is what confirms the eventual "cancelled" state.
+	code, cm := apiReq(t, ts, "DELETE", "/download/"+id, "")
+	if code != 200 {
+		t.Fatalf("DELETE /download/%s = %d %v", id, code, cm)
+	}
+
+	// Poll until the worker finalizes it (FinishCancelled), bounded well
+	// under the DownloadJobTimeout so a regression here fails fast.
+	cancelDeadline := time.Now().Add(5 * time.Second)
+	var final map[string]interface{}
+	for time.Now().Before(cancelDeadline) {
+		code, dj := apiReq(t, ts, "GET", "/download/"+id, "")
+		if code != 200 {
+			t.Fatalf("GET /download/%s = %d %v", id, code, dj)
+		}
+		if dj["status"] == "cancelled" {
+			final = dj
+			break
+		}
+		if dj["status"] == "complete" || dj["status"] == "error" {
+			t.Fatalf("download job = %v, want cancelled", dj)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if final == nil {
+		t.Fatalf("download job did not reach cancelled within 5s")
+	}
+
+	// The queue slot must be freed: health reports the download worker
+	// idle, not still "running" the cancelled job.
+	code, health := apiReq(t, ts, "GET", "/health", "")
+	if code != 200 {
+		t.Fatalf("GET /health = %d %v", code, health)
+	}
+	dl, ok := health["download"].(map[string]interface{})
+	if !ok || dl["running"] != false {
+		t.Errorf("expected download queue freed after cancel, health = %v", health)
 	}
 }

@@ -61,9 +61,42 @@ DL=$(curl -s -H "$H" -X POST $API/download \
 curl -s -H "$H" $API/download/$DL | jq '{status,bytes,size,fileName,error}'
 ```
 
-Job statuses: `queued → running → complete | error`. Finished jobs stay
-readable for one hour. A search that finds nothing is `complete` with
-`"results": []`.
+Job statuses: `queued → running → complete | error | cancelled`. Finished
+jobs stay readable for one hour. A search that finds nothing is `complete`
+with `"results": []`.
+
+## Cancelling jobs
+
+`DELETE /api/search/{jobId}` and `DELETE /api/download/{jobId}` cancel a
+queued or running job:
+
+* **Queued** — the job is marked `cancelled` in place and skipped when its
+  turn comes up; the queue slot is freed immediately.
+* **Running** — the in-flight IRC wait or DCC transfer is aborted; the job
+  is finalized as `cancelled` once the worker observes the cancellation
+  (usually within a second).
+
+A job that already reached `complete`, `error`, or `cancelled` can't be
+cancelled again: `DELETE` on it returns `409 {"code":"not_cancellable"}`.
+An unknown `jobId` returns `404 {"code":"job_not_found"}`, same as `GET`.
+
+```bash
+curl -s -H "$H" -X DELETE $API/download/$DL | jq '.status'
+# "cancelled"
+```
+
+## Book string formats
+
+The `book` string identifying a search result — the `full` field returned
+by `GET /search/{jobId}` — varies by IRC server. Treat it as **opaque**:
+don't parse it, just pass it back verbatim as `POST /download`'s `book`.
+It always starts with `!`. Formats seen in the wild:
+
+| Server family | Shape | Example |
+|---|---|---|
+| Most servers (bare) | `!Server Author - Title (format).ext` | `!DV8 Rebecca Yarros - Fourth Wing.epub` |
+| Firebound | leading `%HASH%` token | `!Firebound %A1B2C3% Author - Title.epub` |
+| TrainFiles | leading `hash \|` token | `!TrainFiles a1b2c3 \| Author - Title.epub` |
 
 ## Endpoints
 
@@ -73,8 +106,10 @@ readable for one hour. A search that finds nothing is `complete` with
 | GET | `/openapi.yaml` | no | this API's OpenAPI 3 document |
 | POST | `/search` | yes | `{"query","limit"}` → `202 {jobId,status,position}` |
 | GET | `/search/{jobId}` | yes | search job + results |
+| DELETE | `/search/{jobId}` | yes | cancel a queued or running search job → `200` job (`status: cancelled`) |
 | POST | `/download` | yes | `{"book"}` → `202 {jobId,status,position}` |
 | GET | `/download/{jobId}` | yes | download job + progress + final path |
+| DELETE | `/download/{jobId}` | yes | cancel a queued or running download job → `200` job (`status: cancelled`) |
 | GET | `/jobs?type=` | yes | all live jobs, newest first |
 | GET | `/servers` | yes | known book servers (from the IRC user list) |
 
@@ -91,7 +126,7 @@ Every non-2xx body is `{"code":"…","message":"…"}`.
 | 401 | `unauthorized` |
 | 404 | `job_not_found`, `not_found` |
 | 405 | `method_not_allowed` |
-| 409 | `browser_session_active`, `queue_full` (3 queued per type) |
+| 409 | `browser_session_active`, `queue_full` (3 queued per type), `not_cancellable` (job already finished) |
 | 503 | `api_disabled` |
 
 Job-level `error.code`: `timeout`, `server_unavailable`, `irc_connect_failed`,
@@ -105,4 +140,5 @@ Job-level `error.code`: `timeout`, `server_unavailable`, `irc_connect_failed`,
 * `--search-job-timeout` (120s) bounds the wait for the search bot;
   `--download-job-timeout` (10m) bounds the wait for the download bot's
   offer — the transfer itself then runs to completion.
-* Files land in `<dir>/books/`, the same place the UI puts them.
+* Files land in `<dir>/books/` by default, the same place the UI puts them —
+  configurable with `--library-subdir` (empty puts them directly in `<dir>`).
