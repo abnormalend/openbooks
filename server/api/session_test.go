@@ -393,3 +393,20 @@ func TestSessionConcurrentConnectBothSucceed(t *testing.T) {
 	conn := <-accepted
 	defer conn.Close()
 }
+
+func TestSessionRoutesQueuePosition(t *testing.T) {
+	addr, accepted, stop := fakeIRC(t)
+	defer stop()
+	s := newTestSession(addr, nil)
+	if err := s.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	srv := <-accepted
+	defer srv.Close()
+
+	fmt.Fprint(srv, ":Bot!u@h NOTICE tester :Added Fourth Wing to queueposition 5.\r\n")
+	ev := waitEvent(t, s.DownloadEvents(), EvQueuePosition)
+	if !strings.Contains(ev.Text, "queueposition 5") {
+		t.Errorf("QueuePosition text = %q", ev.Text)
+	}
+}
