@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"sync"
@@ -201,22 +202,33 @@ func closeLogFile(logger *log.Logger, f io.Closer) {
 	}
 }
 
-func (s *Session) SearchBook(query string) {
+// SearchBook sends the search request over the current IRC connection. It
+// returns an error without sending anything if the session was disconnected
+// between the caller's Connect and this call (e.g. a remote close raced the
+// worker), so callers can fail the job fast instead of waiting out the full
+// timeout for a reply that will never arrive.
+func (s *Session) SearchBook(query string) error {
 	s.mu.Lock()
 	conn := s.conn
 	s.mu.Unlock()
-	if conn != nil {
-		core.SearchBook(conn, s.cfg.SearchBot, query)
+	if conn == nil {
+		return errors.New("irc session not connected")
 	}
+	core.SearchBook(conn, s.cfg.SearchBot, query)
+	return nil
 }
 
-func (s *Session) DownloadBook(book string) {
+// DownloadBook sends the download request over the current IRC connection.
+// See SearchBook for why it returns an error instead of silently no-oping.
+func (s *Session) DownloadBook(book string) error {
 	s.mu.Lock()
 	conn := s.conn
 	s.mu.Unlock()
-	if conn != nil {
-		core.DownloadBook(conn, book)
+	if conn == nil {
+		return errors.New("irc session not connected")
 	}
+	core.DownloadBook(conn, book)
+	return nil
 }
 
 // emit never blocks: core.StartReader dispatches most handlers on their

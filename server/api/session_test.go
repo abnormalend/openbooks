@@ -110,7 +110,9 @@ func TestSessionConnectSearchAndRouteEvents(t *testing.T) {
 		t.Fatalf("handshake lines = %q", lines)
 	}
 
-	s.SearchBook("the great gatsby")
+	if err := s.SearchBook("the great gatsby"); err != nil {
+		t.Fatalf("SearchBook: %v", err)
+	}
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		t.Fatalf("reading search line: %v", err)
@@ -119,7 +121,9 @@ func TestSessionConnectSearchAndRouteEvents(t *testing.T) {
 		t.Errorf("search line = %q", line)
 	}
 
-	s.DownloadBook("!DV8 Some Book.epub")
+	if err := s.DownloadBook("!DV8 Some Book.epub"); err != nil {
+		t.Fatalf("DownloadBook: %v", err)
+	}
 	line, err = reader.ReadString('\n')
 	if err != nil {
 		t.Fatalf("reading download line: %v", err)

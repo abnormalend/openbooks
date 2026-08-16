@@ -33,7 +33,6 @@ HTTP + websocket server that powers OpenBooks' web UI. Hosts the embedded React 
 - `serveWs` rejects new connections when there is already a client (`len(server.clients) > 0`) — OpenBooks is single-user by design. Don't lift this without rethinking the IRC connection model (see `docs/docs/developers/architecture.md` for the future plan).
 - Cookies: the `OpenBooks` cookie holds a UUID (HttpOnly, SameSite=Strict, 7d expiry). The `requireUser` middleware reads it for REST routes; `serveWs` issues it on first connect.
 - `MessageType` constants are mirrored in `app/src/state/messages.ts` — keep the integer ordering in lockstep, and regenerate `messagetype_string.go` (`go generate ./server/...`) after changes.
-- Search rate limiting is enforced server-side via `lastSearchMutex` + `config.SearchTimeout`; the client also has a sense of it via the `RATELIMIT` response.
 - CORS allows only `http://127.0.0.1:5173` (Vite dev server) — the production build is same-origin so it doesn't need CORS. If you change the dev port, update both ends.
 - "Persist" off means downloaded books are deleted right after `http.ServeFile` streams them to the browser (`getBookHandler`).
 - `serveWs` now calls `server.api.Yield()` before upgrading — the API and the browser share one IRC nick and are mutually exclusive.

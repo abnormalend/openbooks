@@ -17,8 +17,8 @@ import (
 type sessionAPI interface {
 	Connect() error
 	Connected() bool
-	SearchBook(query string)
-	DownloadBook(book string)
+	SearchBook(query string) error
+	DownloadBook(book string) error
 	SearchEvents() <-chan Event
 	DownloadEvents() <-chan Event
 }
@@ -61,7 +61,9 @@ func NewWorker(reg *Registry, sess sessionAPI, limiter *SearchLimiter, cfg Worke
 	// colliding with the browser client's own use of os.TempDir() for the
 	// same well-known file names (e.g. results.txt).
 	tempDir := filepath.Join(os.TempDir(), "openbooks-api")
-	_ = os.MkdirAll(tempDir, 0o755) // best-effort; DownloadExtractDCCString also MkdirAlls
+	// Error ignored: a failure here will surface as dcc_failed when the
+	// fetch itself tries to create the file inside tempDir.
+	_ = os.MkdirAll(tempDir, 0o755)
 	return &Worker{
 		reg:     reg,
 		sess:    sess,
@@ -145,7 +147,10 @@ func (w *Worker) doSearch(ctx context.Context, job *Job) {
 	// limiter, and must not be mistaken for this job's response.
 	drain(w.sess.SearchEvents())
 	w.log.Printf("search job %s: sending %q", job.ID, job.Query)
-	w.sess.SearchBook(job.Query)
+	if err := w.sess.SearchBook(job.Query); err != nil {
+		w.fail(job, "irc_disconnected", err)
+		return
+	}
 
 	timer := time.NewTimer(w.cfg.SearchTimeout)
 	defer timer.Stop()
@@ -213,7 +218,10 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 	}
 	drain(w.sess.DownloadEvents())
 	w.log.Printf("download job %s: requesting %q", job.ID, job.Book)
-	w.sess.DownloadBook(job.Book)
+	if err := w.sess.DownloadBook(job.Book); err != nil {
+		w.fail(job, "irc_disconnected", err)
+		return
+	}
 
 	timer := time.NewTimer(w.cfg.DownloadTimeout)
 	defer timer.Stop()

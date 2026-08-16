@@ -18,6 +18,10 @@ type fakeSession struct {
 	connected  bool
 	searched   []string
 	downloaded []string
+	// sendErr, when set, makes SearchBook/DownloadBook return it instead of
+	// queuing any reply, mirroring a session that was disconnected between
+	// Connect and the send.
+	sendErr error
 	// searchReply / downloadReply are pushed onto the matching channel at
 	// the moment SearchBook/DownloadBook is called, mirroring how a real
 	// bot's DCC reply arrives only after the request goes out.
@@ -38,17 +42,25 @@ func (f *fakeSession) Connect() error {
 	return nil
 }
 func (f *fakeSession) Connected() bool { return f.connected }
-func (f *fakeSession) SearchBook(q string) {
+func (f *fakeSession) SearchBook(q string) error {
 	f.searched = append(f.searched, q)
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	for _, ev := range f.searchReply {
 		f.searchEv <- ev
 	}
+	return nil
 }
-func (f *fakeSession) DownloadBook(b string) {
+func (f *fakeSession) DownloadBook(b string) error {
 	f.downloaded = append(f.downloaded, b)
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	for _, ev := range f.downloadReply {
 		f.downloadEv <- ev
 	}
+	return nil
 }
 func (f *fakeSession) SearchEvents() <-chan Event   { return f.searchEv }
 func (f *fakeSession) DownloadEvents() <-chan Event { return f.downloadEv }
@@ -222,6 +234,29 @@ func TestSearchJobDisconnectedMidFlight(t *testing.T) {
 	snap, _ := reg.Get(job.ID)
 	if snap.Error == nil || snap.Error.Code != "irc_disconnected" {
 		t.Errorf("error = %+v", snap.Error)
+	}
+}
+
+// TestSearchJobFailsWhenSendFails covers a session that was disconnected
+// between Connect and the send itself (e.g. a remote close racing the
+// worker): SearchBook returns an error instead of silently no-oping, and
+// the job must fail fast rather than sit waiting for a reply that will
+// never arrive.
+func TestSearchJobFailsWhenSendFails(t *testing.T) {
+	sess := newFakeSession()
+	sess.sendErr = errors.New("irc session not connected")
+	w, reg := newTestWorker(t, sess)
+	job := NewSearchJob("q", 0)
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunSearch(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "irc_disconnected" {
+		t.Errorf("error = %+v, want irc_disconnected", snap.Error)
 	}
 }
 
@@ -433,5 +468,26 @@ func TestDownloadJobDccFailure(t *testing.T) {
 	snap, _ := reg.Get(job.ID)
 	if snap.Error == nil || snap.Error.Code != "dcc_failed" {
 		t.Errorf("error = %+v", snap.Error)
+	}
+}
+
+// TestDownloadJobFailsWhenSendFails is the download-side counterpart to
+// TestSearchJobFailsWhenSendFails: a session disconnected between Connect
+// and the send must fail the job fast instead of waiting out the timeout.
+func TestDownloadJobFailsWhenSendFails(t *testing.T) {
+	sess := newFakeSession()
+	sess.sendErr = errors.New("irc session not connected")
+	w, reg := newTestWorker(t, sess)
+	job := NewDownloadJob("!DV8 book.epub")
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "irc_disconnected" {
+		t.Errorf("error = %+v, want irc_disconnected", snap.Error)
 	}
 }

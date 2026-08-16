@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/evan-buss/openbooks/core"
+	"github.com/evan-buss/openbooks/irc"
 )
 
 // newTestAPIWithFlag returns an API whose BrowserConnected hook reads the
@@ -255,6 +256,66 @@ func TestPostSearchRejectsUnknownFields(t *testing.T) {
 	rec, m := call(t, a, "POST", "/search", `{"query":"a","foo":1}`, "tok")
 	if rec.Code != 400 || m["code"] != "bad_request" {
 		t.Errorf("= %d %v, want 400 bad_request", rec.Code, m)
+	}
+}
+
+// TestIdleCheckDisconnectsIdleSession exercises API.idleCheck against a
+// real (loopback) Session rather than the worker's fakeSession: connect,
+// let the session sit idle past a near-zero IdleTimeout, and confirm
+// idleCheck tears the connection down. It then reconnects and confirms a
+// queued job (reg.Busy() == true) makes idleCheck a no-op, since a job in
+// flight must never have its IRC connection yanked out from under it.
+func TestIdleCheckDisconnectsIdleSession(t *testing.T) {
+	a := newTestAPI(t, false)
+	a.cfg.IdleTimeout = time.Millisecond
+
+	addr, accepted, stop := fakeIRC(t)
+	defer stop()
+	// cfg is a value field on Session; same package, so set it directly
+	// rather than rebuilding the Session.
+	a.sess.cfg.Server = addr
+	// Skip core.Join's 2s sleep: connect + JOIN directly, same as
+	// newTestSession in session_test.go.
+	a.sess.join = func(c *irc.Conn, address string, tls bool) error {
+		if err := c.Connect(address, tls); err != nil {
+			return err
+		}
+		c.JoinChannel("ebooks")
+		return nil
+	}
+
+	if err := a.sess.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	first := <-accepted
+	defer first.Close()
+	if !a.sess.Connected() {
+		t.Fatal("expected session connected")
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	a.idleCheck()
+	if a.sess.Connected() {
+		t.Error("idleCheck should have disconnected an idle session")
+	}
+
+	// Reconnect, then confirm a queued job blocks idleCheck from
+	// disconnecting even though IdleTimeout has long since elapsed.
+	if err := a.sess.Connect(); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	second := <-accepted
+	defer second.Close()
+	if !a.sess.Connected() {
+		t.Fatal("expected session reconnected")
+	}
+
+	call(t, a, "POST", "/search", `{"query":"a"}`, "tok")
+
+	time.Sleep(5 * time.Millisecond)
+	a.idleCheck()
+	if !a.sess.Connected() {
+		t.Error("idleCheck must not disconnect while a job is queued")
 	}
 }
 
