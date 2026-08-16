@@ -38,8 +38,8 @@ func (r *readerConn) SetWriteDeadline(time.Time) error { return nil }
 // races. StartReader dispatches handlers as goroutines, so naive
 // chan + close patterns fail under -race.
 type recorder struct {
-	mu    sync.Mutex
-	seen  []event
+	mu   sync.Mutex
+	seen []event
 }
 
 func (r *recorder) record(e event) func(string) {
@@ -155,5 +155,56 @@ func TestStartReaderDistinguishesSearchFromBookDccSend(t *testing.T) {
 	}
 	if !hasSR || !hasBR {
 		t.Errorf("expected both SearchResult and BookResult, got %v", got)
+	}
+}
+
+func TestStartReaderClassifiesQueuePosition(t *testing.T) {
+	lines := strings.Join([]string{
+		":Bot!u@h NOTICE evan :Added Fourth Wing to queueposition 5.",         // NOTICE form
+		":Bot!u@h PRIVMSG evan :You are now in queue position 3 for the file", // PRIVMSG form
+		":Bot!u@h NOTICE evan :QUEUEPOSITION 1",                               // case-insensitive
+	}, "\r\n") + "\r\n"
+
+	r := &recorder{}
+	handler := EventHandler{
+		QueuePosition: r.record(QueuePosition),
+		NoResults:     r.record(NoResults),
+		BadServer:     r.record(BadServer),
+	}
+	runReader(t, lines, handler)
+
+	got := r.waitFor(t, 3, 2*time.Second)
+	if len(got) != 3 {
+		t.Fatalf("got %d events, want 3 QueuePosition: %+v", len(got), got)
+	}
+	for _, ev := range got {
+		if ev != QueuePosition {
+			t.Errorf("event = %v, want QueuePosition", ev)
+		}
+	}
+}
+
+func TestQueuePositionDoesNotStealOtherNotices(t *testing.T) {
+	// A queue line must not swallow the existing notice classifications.
+	lines := strings.Join([]string{
+		":server NOTICE evan :Sorry, nothing found",
+		":server NOTICE evan :try another server",
+		":Bot!u@h PRIVMSG evan :DCC SEND book.epub 1 1 1", // still a BookResult, no 'queue'
+	}, "\r\n") + "\r\n"
+	r := &recorder{}
+	handler := EventHandler{
+		NoResults:     r.record(NoResults),
+		BadServer:     r.record(BadServer),
+		BookResult:    r.record(BookResult),
+		QueuePosition: r.record(QueuePosition),
+	}
+	runReader(t, lines, handler)
+	got := r.waitFor(t, 3, 2*time.Second)
+	seen := map[event]int{}
+	for _, e := range got {
+		seen[e]++
+	}
+	if seen[NoResults] != 1 || seen[BadServer] != 1 || seen[BookResult] != 1 || seen[QueuePosition] != 0 {
+		t.Errorf("misclassified: %+v", seen)
 	}
 }

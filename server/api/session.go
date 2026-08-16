@@ -23,6 +23,7 @@ const (
 	EvNoResults
 	EvBookResult
 	EvBadServer
+	EvQueuePosition
 	// EvDisconnected is pushed onto both channels when the IRC reader exits.
 	EvDisconnected
 )
@@ -257,6 +258,7 @@ func (s *Session) handlers(conn *irc.Conn, logger *log.Logger) core.EventHandler
 		core.NoResults:      s.route(s.searchEv, EvNoResults),
 		core.BookResult:     s.route(s.downloadEv, EvBookResult),
 		core.BadServer:      s.route(s.downloadEv, EvBadServer),
+		core.QueuePosition:  s.route(s.downloadEv, EvQueuePosition),
 		core.Ping:           func(text string) { conn.Pong(text) },
 		core.Version:        func(line string) { core.SendVersionInfo(conn, line, s.cfg.UserAgent) },
 		core.ServerList: func(text string) {

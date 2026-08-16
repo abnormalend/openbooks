@@ -491,3 +491,99 @@ func TestDownloadJobFailsWhenSendFails(t *testing.T) {
 		t.Errorf("error = %+v, want irc_disconnected", snap.Error)
 	}
 }
+
+func TestDownloadRecordsQueuePositionThenCompletes(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+		p := filepath.Join(baseDir, "gatsby.epub")
+		os.MkdirAll(baseDir, 0o755)
+		os.WriteFile(p, []byte("x"), 0o644)
+		return p, nil
+	}
+	// queue notice first, then the DCC offer — both delivered when DownloadBook is called
+	sess.downloadReply = []Event{
+		{Kind: EvQueuePosition, Text: "Added to queueposition 5."},
+		{Kind: EvBookResult, Text: "DCC SEND gatsby.epub 2130706433 6669 1"},
+	}
+	job := NewDownloadJob("!DV8 book.epub")
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunDownload(ctx)
+	waitStatus(t, reg, job, StatusComplete)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if snap.QueuePosition != 5 {
+		t.Errorf("QueuePosition = %d, want 5", snap.QueuePosition)
+	}
+}
+
+func TestQueuePositionResetsTimerButCapBounds(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	// Very short base timeout; the feeder goroutine below streams queue
+	// notices continuously (faster than the base timeout) so the timer
+	// keeps getting reset and the job can only ever fail at the absolute
+	// cap (2x base), never at one un-reset base interval.
+	w.cfg.DownloadTimeout = 40 * time.Millisecond
+
+	job := NewDownloadJob("!DV8 book.epub")
+	reg.Enqueue(job)
+
+	stop := make(chan struct{})
+	feederDone := make(chan struct{})
+	go func() {
+		defer close(feederDone)
+		ticker := time.NewTicker(15 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				select {
+				case sess.downloadEv <- Event{Kind: EvQueuePosition, Text: "queueposition 7"}:
+				case <-stop:
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	go w.RunDownload(ctx)
+	// Must still terminate at the cap (2x=80ms) even though continuous
+	// queue notices keep resetting the timer. An unbounded reset would
+	// never fail (it would run until the feeder stops / this call times
+	// out waitStatus's own 3s deadline).
+	waitStatus(t, reg, job, StatusError)
+	elapsed := time.Since(start)
+	close(stop)
+	<-feederDone
+	cancel()
+
+	if elapsed < 70*time.Millisecond || elapsed >= 200*time.Millisecond {
+		t.Errorf("elapsed = %s, want >= 70ms and < 200ms (base 40ms, cap 80ms)", elapsed)
+	}
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "timeout" {
+		t.Errorf("error = %+v, want timeout", snap.Error)
+	}
+}
+
+func TestParseQueuePosition(t *testing.T) {
+	cases := map[string]int{
+		"Added Fourth Wing to queueposition 5.":    5,
+		"you are now in queue position 12 for foo": 12,
+		"QUEUEPOSITION 1":                          1,
+		"no number here":                           0,
+	}
+	for in, want := range cases {
+		if got := parseQueuePosition(in); got != want {
+			t.Errorf("parseQueuePosition(%q) = %d, want %d", in, got, want)
+		}
+	}
+}

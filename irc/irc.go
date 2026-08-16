@@ -3,7 +3,13 @@ package irc
 import (
 	"crypto/tls"
 	"net"
+	"time"
 )
+
+// writeTimeout bounds every write to the IRC socket. A wedged peer (full
+// send buffer) would otherwise block net.Conn.Write forever and hang the
+// caller — notably the API download worker. Shared by all sessions.
+const writeTimeout = 30 * time.Second
 
 // Conn represents an IRC connection to a server
 type Conn struct {
@@ -55,6 +61,16 @@ func (i *Conn) Disconnect() {
 	}
 	i.Write([]byte("QUIT :Goodbye\r\n"))
 	i.Conn.Close()
+}
+
+// Write overrides the promoted net.Conn.Write to arm a write deadline first,
+// so a blocked send errors out instead of hanging indefinitely.
+func (i *Conn) Write(b []byte) (int, error) {
+	if !i.IsConnected() {
+		return 0, net.ErrClosed
+	}
+	_ = i.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	return i.Conn.Write(b)
 }
 
 // SendMessage sends the given message string to the connected IRC server

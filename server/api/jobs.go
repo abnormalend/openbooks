@@ -51,11 +51,12 @@ type Job struct {
 	ParseErrors int
 
 	// Download fields
-	Book     string
-	Bytes    int64
-	Size     int64
-	Path     *string
-	FileName *string
+	Book          string
+	Bytes         int64
+	Size          int64
+	QueuePosition int
+	Path          *string
+	FileName      *string
 }
 
 func NewSearchJob(query string, limit int) *Job {
@@ -92,12 +93,13 @@ func (j Job) MarshalJSON() ([]byte, error) {
 	default:
 		return json.Marshal(struct {
 			common
-			Book     string  `json:"book"`
-			Bytes    int64   `json:"bytes"`
-			Size     int64   `json:"size"`
-			Path     *string `json:"path"`
-			FileName *string `json:"fileName"`
-		}{c, j.Book, j.Bytes, j.Size, j.Path, j.FileName})
+			Book          string  `json:"book"`
+			Bytes         int64   `json:"bytes"`
+			Size          int64   `json:"size"`
+			QueuePosition int     `json:"queuePosition"`
+			Path          *string `json:"path"`
+			FileName      *string `json:"fileName"`
+		}{c, j.Book, j.Bytes, j.Size, j.QueuePosition, j.Path, j.FileName})
 	}
 }
 

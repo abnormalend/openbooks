@@ -53,6 +53,7 @@ func startApiIrcServer(t *testing.T, resultsPort string, resultsSize int, bookPo
 				fmt.Fprintf(conn, ":search!u@h NOTICE tester :Your search has been accepted\r\n")
 				fmt.Fprintf(conn, ":search!u@h PRIVMSG tester :DCC SEND Search_results_for__gatsby.txt.zip 2130706433 %s %d\r\n", resultsPort, resultsSize)
 			case strings.HasPrefix(line, "PRIVMSG #ebooks :!"):
+				fmt.Fprintf(conn, ":DV8!u@h NOTICE tester :Added to queueposition 2.\r\n")
 				fmt.Fprintf(conn, ":DV8!u@h PRIVMSG tester :DCC SEND great-gatsby.epub 2130706433 %s %d\r\n", bookPort, bookSize)
 			}
 		}
@@ -197,6 +198,9 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 	}
 	if dj["fileName"] != "great-gatsby.epub" || dj["size"] != float64(len(book)) || dj["bytes"] != float64(len(book)) {
 		t.Errorf("download job fields = %v", dj)
+	}
+	if dj["queuePosition"] != float64(2) {
+		t.Errorf("queuePosition = %v, want 2", dj["queuePosition"])
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "books", "great-gatsby.epub"))
 	if err != nil {
