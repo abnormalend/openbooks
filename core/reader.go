@@ -23,6 +23,7 @@ const (
 	ServerList     = event(8)
 	Ping           = event(9)
 	Version        = event(10)
+	QueuePosition  = event(11)
 )
 
 // Unique identifiers found in the message for various different events.
@@ -38,6 +39,8 @@ const (
 	beginUserList          = "353"
 	endUserList            = "366"
 	versionInquiry         = "\x01VERSION\x01"
+	queuePosition          = "queueposition"
+	queuePositionAlt       = "queue position"
 )
 
 type HandlerFunc func(text string)
@@ -63,12 +66,15 @@ func StartReader(ctx context.Context, irc *irc.Conn, handler EventHandler) {
 			}
 
 			event := noOp
+			lower := strings.ToLower(text)
 			if strings.Contains(text, sendMessage) {
 				if strings.Contains(text, searchResultIdentifier) {
 					event = SearchResult
 				} else {
 					event = BookResult
 				}
+			} else if strings.Contains(lower, queuePosition) || strings.Contains(lower, queuePositionAlt) {
+				event = QueuePosition
 			} else if strings.Contains(text, noticeMessage) {
 				if strings.Contains(text, noResults) {
 					event = NoResults
