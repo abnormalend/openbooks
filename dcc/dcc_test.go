@@ -2,6 +2,13 @@ package dcc
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"time"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
@@ -63,4 +70,48 @@ func TestDownload(t *testing.T) {
 	err := textDownload.Download(received)
 	require.NoError(t, err)
 	assert.Equal(t, text, string(received.Data))
+}
+
+func TestDownloadContextAbortsOnCancel(t *testing.T) {
+	// A DCC server that announces a big size but dribbles bytes forever.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 64)
+		for {
+			if _, err := conn.Write(buf); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	ip, portStr, _ := net.SplitHostPort(l.Addr().String())
+	var ipInt uint32
+	for _, b := range net.ParseIP(ip).To4() {
+		ipInt = ipInt<<8 | uint32(b)
+	}
+	port, _ := strconv.Atoi(portStr)
+	d := Download{Filename: "x", IP: ip, Port: fmt.Sprintf("%d", port), Size: 1 << 30}
+	_ = ipInt
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(80 * time.Millisecond); cancel() }()
+	done := make(chan error, 1)
+	go func() { done <- d.DownloadContext(ctx, io.Discard) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a cancelled download")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("DownloadContext did not return promptly after cancel")
+	}
 }

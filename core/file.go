@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,10 @@ import (
 )
 
 func DownloadExtractDCCString(baseDir, dccStr string, progress io.Writer) (string, error) {
+	return DownloadExtractDCCStringContext(context.Background(), baseDir, dccStr, progress)
+}
+
+func DownloadExtractDCCStringContext(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error) {
 	// Download the file and wait until it is completed
 	download, err := dcc.ParseString(dccStr)
 	if err != nil {
@@ -37,8 +42,9 @@ func DownloadExtractDCCString(baseDir, dccStr string, progress io.Writer) (strin
 	}
 
 	// Download DCC data to the file
-	err = download.Download(writer)
+	err = download.DownloadContext(ctx, writer)
 	if err != nil {
+		file.Close()
 		return "", err
 	}
 	file.Close()

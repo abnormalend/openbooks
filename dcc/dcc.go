@@ -1,6 +1,7 @@
 package dcc
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -53,14 +54,30 @@ func ParseString(text string) (*Download, error) {
 	}, nil
 }
 
-// Download writes the data contained in the DCC Download
+// Download writes the DCC data to writer (uncancellable).
 func (download Download) Download(writer io.Writer) error {
+	return download.DownloadContext(context.Background(), writer)
+}
+
+// DownloadContext is Download with cancellation: when ctx is cancelled the
+// underlying connection is closed, unblocking the read loop with an error.
+func (download Download) DownloadContext(ctx context.Context, writer io.Writer) error {
 	// TODO: Maybe specify deadline?
 	conn, err := net.Dial("tcp", download.IP+":"+download.Port)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-stop:
+		}
+	}()
 
 	// NOTE: Not using the idiomatic io.Copy or io.CopyBuffer because they are
 	// much slower in real world tests than the manual way. I suspect it has to
@@ -77,6 +94,9 @@ func (download Download) Download(writer io.Writer) error {
 	for int64(received) < download.Size {
 		n, err := conn.Read(bytes)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			return err
 		}
 
