@@ -23,10 +23,11 @@ const (
 type Status string
 
 const (
-	StatusQueued   Status = "queued"
-	StatusRunning  Status = "running"
-	StatusComplete Status = "complete"
-	StatusError    Status = "error"
+	StatusQueued    Status = "queued"
+	StatusRunning   Status = "running"
+	StatusComplete  Status = "complete"
+	StatusError     Status = "error"
+	StatusCancelled Status = "cancelled"
 )
 
 // ErrQueueFull is returned by Enqueue when the per-type queue is at capacity.
@@ -119,6 +120,14 @@ type Registry struct {
 	// lastFinished is used by the idle watcher to decide when to drop IRC.
 	lastFinished time.Time
 	now          func() time.Time
+
+	// cancels holds the per-job cancel func for currently-running jobs,
+	// registered by the worker on start and cleared on finish. cancelled
+	// marks jobs (queued or running) whose Cancel was requested, so the
+	// worker can distinguish a cancel-triggered ctx.Done from parent
+	// shutdown.
+	cancels   map[uuid.UUID]context.CancelFunc
+	cancelled map[uuid.UUID]bool
 }
 
 func NewRegistry(queueDepth int, ttl time.Duration) *Registry {
@@ -128,8 +137,10 @@ func NewRegistry(queueDepth int, ttl time.Duration) *Registry {
 			JobSearch:   make(chan *Job, queueDepth),
 			JobDownload: make(chan *Job, queueDepth),
 		},
-		ttl: ttl,
-		now: time.Now,
+		ttl:       ttl,
+		now:       time.Now,
+		cancels:   make(map[uuid.UUID]context.CancelFunc),
+		cancelled: make(map[uuid.UUID]bool),
 	}
 }
 
@@ -164,19 +175,92 @@ func (r *Registry) Enqueue(job *Job) (int, error) {
 }
 
 // Next blocks until a job of the given type is available (marking it
-// running) or ctx is done (returning nil).
+// running) or ctx is done (returning nil). Jobs cancelled while queued are
+// skipped (the channel receive already freed their slot).
 func (r *Registry) Next(ctx context.Context, t JobType) *Job {
-	select {
-	case job := <-r.queues[t]:
-		r.mu.Lock()
-		now := r.now()
-		job.Status = StatusRunning
-		job.StartedAt = &now
-		r.mu.Unlock()
-		return job
-	case <-ctx.Done():
-		return nil
+	for {
+		select {
+		case job := <-r.queues[t]:
+			r.mu.Lock()
+			if job.Status == StatusCancelled {
+				r.mu.Unlock()
+				continue // slot already freed by the receive; skip
+			}
+			now := r.now()
+			job.Status = StatusRunning
+			job.StartedAt = &now
+			r.mu.Unlock()
+			return job
+		case <-ctx.Done():
+			return nil
+		}
 	}
+}
+
+// SetCancel registers a running job's cancel func. ClearCancel removes it.
+func (r *Registry) SetCancel(id uuid.UUID, fn context.CancelFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cancels[id] = fn
+}
+
+func (r *Registry) ClearCancel(id uuid.UUID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.cancels, id)
+}
+
+// WasCancelled reports whether Cancel was requested for id.
+func (r *Registry) WasCancelled(id uuid.UUID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancelled[id]
+}
+
+// Cancel cancels a queued or running job. Queued jobs are marked cancelled
+// in place (Next skips them, freeing the slot on receive); running jobs get
+// their cancel func invoked and are finalized by the worker.
+func (r *Registry) Cancel(id uuid.UUID) (Job, *APIError) {
+	r.mu.Lock()
+	job, ok := r.jobs[id]
+	if !ok {
+		r.mu.Unlock()
+		return Job{}, &APIError{Code: "job_not_found", Message: "no such job"}
+	}
+	switch job.Status {
+	case StatusComplete, StatusError, StatusCancelled:
+		snap := *job
+		r.mu.Unlock()
+		return snap, &APIError{Code: "not_cancellable", Message: "job already finished"}
+	case StatusQueued:
+		now := r.now()
+		job.Status = StatusCancelled
+		job.FinishedAt = &now
+		r.lastFinished = now
+		snap := *job
+		r.mu.Unlock()
+		return snap, nil
+	default: // running
+		r.cancelled[id] = true
+		fn := r.cancels[id]
+		snap := *job
+		r.mu.Unlock()
+		if fn != nil {
+			fn()
+		}
+		return snap, nil
+	}
+}
+
+// FinishCancelled finalizes a running job the worker observed as cancelled.
+func (r *Registry) FinishCancelled(job *Job) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	job.Status = StatusCancelled
+	job.FinishedAt = &now
+	r.lastFinished = now
+	delete(r.cancels, job.ID)
 }
 
 // Update mutates a job under the registry lock.
