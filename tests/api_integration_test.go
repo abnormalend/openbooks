@@ -3,10 +3,12 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +30,8 @@ func startApiIrcServer(t *testing.T, resultsPort string, resultsSize int, bookPo
 	if err != nil {
 		t.Fatal(err)
 	}
+	var mu sync.Mutex
+	var accepted net.Conn
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -36,39 +40,57 @@ func startApiIrcServer(t *testing.T, resultsPort string, resultsSize int, bookPo
 		if err != nil {
 			return
 		}
+		mu.Lock()
+		accepted = conn
+		mu.Unlock()
 		defer conn.Close()
-		buf := make([]byte, 4096)
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				return
-			}
-			for _, line := range strings.Split(string(buf[:n]), "\n") {
-				switch {
-				case strings.Contains(line, "@search"):
-					fmt.Fprintf(conn, ":search!u@h NOTICE tester :Your search has been accepted\r\n")
-					fmt.Fprintf(conn, ":search!u@h PRIVMSG tester :DCC SEND Search_results_for__gatsby.txt.zip 2130706433 %s %d\r\n", resultsPort, resultsSize)
-				case strings.HasPrefix(line, "PRIVMSG #ebooks :!"):
-					fmt.Fprintf(conn, ":DV8!u@h PRIVMSG tester :DCC SEND great-gatsby.epub 2130706433 %s %d\r\n", bookPort, bookSize)
-				}
+
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch {
+			case strings.Contains(line, "@search"):
+				fmt.Fprintf(conn, ":search!u@h NOTICE tester :Your search has been accepted\r\n")
+				fmt.Fprintf(conn, ":search!u@h PRIVMSG tester :DCC SEND Search_results_for__gatsby.txt.zip 2130706433 %s %d\r\n", resultsPort, resultsSize)
+			case strings.HasPrefix(line, "PRIVMSG #ebooks :!"):
+				fmt.Fprintf(conn, ":DV8!u@h PRIVMSG tester :DCC SEND great-gatsby.epub 2130706433 %s %d\r\n", bookPort, bookSize)
 			}
 		}
 	}()
-	return l.Addr().String(), func() { l.Close(); wg.Wait() }
+	return l.Addr().String(), func() {
+		l.Close()
+		mu.Lock()
+		if accepted != nil {
+			accepted.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	}
 }
 
 func apiReq(t *testing.T, ts *httptest.Server, method, path, body string) (int, map[string]interface{}) {
 	t.Helper()
-	req, _ := http.NewRequest(method, ts.URL+"/api"+path, strings.NewReader(body))
+	req, err := http.NewRequest(method, ts.URL+"/api"+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest %s %s: %v", method, path, err)
+	}
 	req.Header.Set("Authorization", "Bearer integration-token")
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer res.Body.Close()
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("%s %s: read body: %v", method, path, err)
+	}
 	var m map[string]interface{}
-	json.NewDecoder(res.Body).Decode(&m)
+	if len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, &m); err != nil {
+			t.Fatalf("%s %s: decode body %q: %v", method, path, bodyBytes, err)
+		}
+	}
 	return res.StatusCode, m
 }
 
@@ -104,7 +126,7 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h := server.NewHandler(ctx, server.Config{
+	handler := server.NewHandler(ctx, server.Config{
 		Basepath:           "/",
 		DownloadDir:        dir,
 		Persist:            true,
@@ -119,11 +141,15 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 		DownloadJobTimeout: 10 * time.Second,
 		Version:            "it",
 	})
-	ts := httptest.NewServer(h)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	// Unauthenticated → 401
-	res, _ := http.Post(ts.URL+"/api/search", "application/json", strings.NewReader(`{"query":"x"}`))
+	res, err := http.Post(ts.URL+"/api/search", "application/json", strings.NewReader(`{"query":"x"}`))
+	if err != nil {
+		t.Fatalf("POST /api/search (unauth): %v", err)
+	}
+	defer res.Body.Close()
 	if res.StatusCode != 401 {
 		t.Fatalf("unauth = %d", res.StatusCode)
 	}
@@ -137,7 +163,12 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 
 	// Browser must be refused while the job is live (core.Join sleeps 2s,
 	// so the job is still running here).
-	if wsRes, _ := http.Get(ts.URL + "/ws"); wsRes.StatusCode != 409 {
+	wsRes, err := http.Get(ts.URL + "/ws")
+	if err != nil {
+		t.Fatalf("GET /ws: %v", err)
+	}
+	wsRes.Body.Close()
+	if wsRes.StatusCode != 409 {
 		t.Errorf("/ws during API job = %d, want 409", wsRes.StatusCode)
 	}
 
@@ -176,9 +207,9 @@ func TestAPISearchThenDownloadEndToEnd(t *testing.T) {
 	}
 
 	// Health reflects a connected, idle API session
-	code, h2 := apiReq(t, ts, "GET", "/health", "")
-	if code != 200 || h2["ircConnected"] != true {
-		t.Errorf("health = %d %v", code, h2)
+	code, health := apiReq(t, ts, "GET", "/health", "")
+	if code != 200 || health["ircConnected"] != true {
+		t.Errorf("health = %d %v", code, health)
 	}
 
 	// Jobs list has both
