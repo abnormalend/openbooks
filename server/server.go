@@ -51,11 +51,16 @@ type server struct {
 
 // Config contains settings for server
 type Config struct {
-	Log                     bool
-	Port                    string
-	UserName                string
-	Persist                 bool
-	DownloadDir             string
+	Log         bool
+	Port        string
+	UserName    string
+	Persist     bool
+	DownloadDir string
+	// LibrarySubdir is the subdirectory under DownloadDir where downloaded
+	// books are stored and served from. Empty is a valid, intended value
+	// meaning "the DownloadDir root" — not coerced to a default here (the
+	// CLI flag's default is "books").
+	LibrarySubdir           string
 	Basepath                string
 	Server                  string
 	EnableTLS               bool
@@ -92,6 +97,7 @@ func New(config Config) *server {
 		Version:         config.Version,
 		BasePath:        config.Basepath,
 		DownloadDir:     config.DownloadDir,
+		LibrarySubdir:   config.LibrarySubdir,
 		IdleTimeout:     config.APIIdleTimeout,
 		SearchTimeout:   config.SearchJobTimeout,
 		DownloadTimeout: config.DownloadJobTimeout,
@@ -201,8 +207,15 @@ func registerGracefulShutdown(cancel context.CancelFunc) {
 	}()
 }
 
+// libraryDir is the directory downloaded books are stored in and served
+// from: DownloadDir joined with LibrarySubdir. An empty LibrarySubdir is a
+// valid, intended configuration meaning "the DownloadDir root".
+func (c Config) libraryDir() string {
+	return filepath.Join(c.DownloadDir, c.LibrarySubdir)
+}
+
 func createBooksDirectory(config Config) {
-	err := os.MkdirAll(filepath.Join(config.DownloadDir, "books"), os.FileMode(0755))
+	err := os.MkdirAll(config.libraryDir(), os.FileMode(0755))
 	if err != nil {
 		panic(err)
 	}

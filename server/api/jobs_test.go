@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/evan-buss/openbooks/core"
+	"github.com/google/uuid"
 )
 
 func TestEnqueueReturnsPositionAndQueueFull(t *testing.T) {
@@ -188,5 +189,100 @@ func TestBusyIsTrueFromEnqueueUntilFinish(t *testing.T) {
 	r.Finish(job, nil)
 	if r.Busy() {
 		t.Error("Busy should be false after Finish")
+	}
+}
+
+func TestCancelQueuedMarksCancelledAndNextSkips(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	job := NewDownloadJob("!x")
+	r.Enqueue(job)
+	got, apiErr := r.Cancel(job.ID)
+	if apiErr != nil {
+		t.Fatalf("cancel: %+v", apiErr)
+	}
+	if got.Status != StatusCancelled {
+		t.Errorf("status = %s, want cancelled", got.Status)
+	}
+	// Next must skip the cancelled job (and, with nothing else queued, block
+	// until ctx cancel → return nil).
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if j := r.Next(ctx, JobDownload); j != nil {
+		t.Errorf("Next returned a cancelled job: %+v", j)
+	}
+}
+
+func TestCancelRunningInvokesCancelFunc(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	job := NewDownloadJob("!x")
+	r.Enqueue(job)
+	r.Next(context.Background(), JobDownload) // marks running
+	called := false
+	r.SetCancel(job.ID, func() { called = true })
+
+	got, apiErr := r.Cancel(job.ID)
+	if apiErr != nil {
+		t.Fatalf("cancel: %+v", apiErr)
+	}
+	if !called {
+		t.Error("cancel func not invoked for running job")
+	}
+	if !r.WasCancelled(job.ID) {
+		t.Error("WasCancelled should be true")
+	}
+	// Worker finalizes:
+	r.FinishCancelled(job)
+	snap, _ := r.Get(job.ID)
+	if snap.Status != StatusCancelled || snap.FinishedAt == nil {
+		t.Errorf("after FinishCancelled: %+v", snap)
+	}
+	_ = got
+}
+
+func TestCancelUnknownAndTerminal(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	if _, e := r.Cancel(uuid.New()); e == nil || e.Code != "job_not_found" {
+		t.Errorf("unknown: %+v", e)
+	}
+	job := NewSearchJob("q", 0)
+	r.Enqueue(job)
+	r.Next(context.Background(), JobSearch)
+	r.Finish(job, nil) // complete
+	if _, e := r.Cancel(job.ID); e == nil || e.Code != "not_cancellable" {
+		t.Errorf("terminal: %+v", e)
+	}
+}
+
+func TestCancelMarkerClearedOnFinish(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	job := NewDownloadJob("!x")
+	r.Enqueue(job)
+	r.Next(context.Background(), JobDownload)
+	r.SetCancel(job.ID, func() {})
+	r.Finish(job, nil)
+	if r.WasCancelled(job.ID) {
+		t.Error("WasCancelled should be false after Finish")
+	}
+	r.mu.Lock()
+	_, hasCancel := r.cancels[job.ID]
+	_, hasCancelled := r.cancelled[job.ID]
+	r.mu.Unlock()
+	if hasCancel || hasCancelled {
+		t.Errorf("cancels/cancelled maps not pruned after Finish: cancel=%v cancelled=%v", hasCancel, hasCancelled)
+	}
+}
+
+func TestSetCancelHonorsAlreadyCancelled(t *testing.T) {
+	r := NewRegistry(3, time.Hour)
+	job := NewDownloadJob("!x")
+	r.Enqueue(job)
+	r.Next(context.Background(), JobDownload) // marks running; SetCancel not yet called (simulates the TOCTOU window)
+	if _, e := r.Cancel(job.ID); e != nil {
+		t.Fatalf("cancel: %+v", e)
+	}
+	called := false
+	r.SetCancel(job.ID, func() { called = true })
+	if !called {
+		t.Error("SetCancel should immediately invoke fn for an already-cancelled job")
 	}
 }

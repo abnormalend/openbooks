@@ -73,6 +73,23 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/Disabled" }
+    delete:
+      summary: Cancel a queued or running search job
+      description: |
+        Queued jobs are marked `cancelled` in place and skipped by the
+        worker. Running jobs have their in-flight IRC/DCC work aborted;
+        the job is finalized as `cancelled` once the worker observes it.
+      parameters: [ { $ref: "#/components/parameters/jobId" } ]
+      responses:
+        "200":
+          description: Job cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchJob" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotCancellable" }
+        "503": { $ref: "#/components/responses/Disabled" }
   /download:
     post:
       summary: Queue a download of one search result
@@ -107,6 +124,23 @@ paths:
               schema: { $ref: "#/components/schemas/DownloadJob" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    delete:
+      summary: Cancel a queued or running download job
+      description: |
+        Queued jobs are marked `cancelled` in place and skipped by the
+        worker. Running jobs have their in-flight DCC transfer aborted;
+        the job is finalized as `cancelled` once the worker observes it.
+      parameters: [ { $ref: "#/components/parameters/jobId" } ]
+      responses:
+        "200":
+          description: Job cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DownloadJob" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotCancellable" }
         "503": { $ref: "#/components/responses/Disabled" }
   /jobs:
     get:
@@ -182,6 +216,9 @@ components:
     Conflict:
       description: "`browser_session_active` or `queue_full`"
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotCancellable:
+      description: Job already reached a terminal state (`not_cancellable`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     Disabled:
       description: No API token configured (`api_disabled`)
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -214,7 +251,7 @@ components:
       properties:
         jobId: { type: string, format: uuid }
         type: { type: string, enum: [search, download] }
-        status: { type: string, enum: [queued, running, complete, error] }
+        status: { type: string, enum: [queued, running, complete, error, cancelled] }
         createdAt: { type: string, format: date-time }
         startedAt: { type: string, format: date-time, nullable: true }
         finishedAt: { type: string, format: date-time, nullable: true }

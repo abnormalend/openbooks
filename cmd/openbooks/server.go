@@ -25,6 +25,7 @@ func init() {
 	serverCmd.Flags().BoolVarP(&openBrowser, "browser", "b", false, "Open the browser on server start.")
 	serverCmd.Flags().BoolVar(&serverConfig.Persist, "persist", false, "Persist eBooks in 'dir'. Default is to delete after sending.")
 	serverCmd.Flags().StringVarP(&serverConfig.DownloadDir, "dir", "d", filepath.Join(os.TempDir(), "openbooks"), "The directory where eBooks are saved when persist enabled.")
+	serverCmd.Flags().StringVar(&serverConfig.LibrarySubdir, "library-subdir", "books", "Subdirectory under --dir where downloaded books are stored and served. Empty = --dir root.")
 	serverCmd.Flags().StringVar(&serverConfig.APIToken, "api-token", "", "Bearer token for the REST API under <basepath>api/. Falls back to $OPENBOOKS_API_TOKEN. Empty disables the API.")
 	serverCmd.Flags().DurationVar(&serverConfig.APIIdleTimeout, "api-idle-timeout", 5*time.Minute, "Disconnect the API's IRC session after this long with no jobs.")
 	serverCmd.Flags().DurationVar(&serverConfig.SearchJobTimeout, "search-job-timeout", 2*time.Minute, "Fail an API search job if the bot hasn't answered within this long.")

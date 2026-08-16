@@ -91,6 +91,7 @@ func newTestWorker(t *testing.T, sess sessionAPI) (*Worker, *Registry) {
 		DownloadDir:     t.TempDir(),
 		SearchTimeout:   200 * time.Millisecond,
 		DownloadTimeout: 200 * time.Millisecond,
+		LibrarySubdir:   "books",
 	}, log.New(io.Discard, "", 0))
 	w.tempDir = t.TempDir()
 	return w, reg
@@ -386,7 +387,7 @@ func TestDownloadJobCompletesWithFile(t *testing.T) {
 	sess := newFakeSession()
 	w, reg := newTestWorker(t, sess)
 	var fetchedDir string
-	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+	w.fetchCtx = func(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error) {
 		fetchedDir = baseDir
 		p := filepath.Join(baseDir, "great-gatsby.epub")
 		os.MkdirAll(baseDir, 0o755)
@@ -455,7 +456,7 @@ func TestDownloadJobTimeout(t *testing.T) {
 func TestDownloadJobDccFailure(t *testing.T) {
 	sess := newFakeSession()
 	w, reg := newTestWorker(t, sess)
-	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+	w.fetchCtx = func(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error) {
 		return "", errors.New("connection reset")
 	}
 	job := NewDownloadJob("!DV8 book.epub")
@@ -495,7 +496,7 @@ func TestDownloadJobFailsWhenSendFails(t *testing.T) {
 func TestDownloadRecordsQueuePositionThenCompletes(t *testing.T) {
 	sess := newFakeSession()
 	w, reg := newTestWorker(t, sess)
-	w.fetch = func(baseDir, dccStr string, progress io.Writer) (string, error) {
+	w.fetchCtx = func(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error) {
 		p := filepath.Join(baseDir, "gatsby.epub")
 		os.MkdirAll(baseDir, 0o755)
 		os.WriteFile(p, []byte("x"), 0o644)
@@ -585,5 +586,50 @@ func TestParseQueuePosition(t *testing.T) {
 		if got := parseQueuePosition(in); got != want {
 			t.Errorf("parseQueuePosition(%q) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+func TestDownloadCancelledMidTransfer(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	fetchStarted := make(chan struct{})
+	// fetch blocks until its ctx is cancelled, simulating an in-flight transfer.
+	w.fetchCtx = func(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error) {
+		close(fetchStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	sess.downloadReply = []Event{{Kind: EvBookResult, Text: "DCC SEND x 2130706433 6669 10"}}
+	job := NewDownloadJob("!x")
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.RunDownload(ctx)
+
+	<-fetchStarted
+	if _, e := reg.Cancel(job.ID); e != nil {
+		t.Fatalf("cancel: %+v", e)
+	}
+	waitStatus(t, reg, job, StatusCancelled)
+}
+
+func TestQueuedDownloadCancelledIsSkipped(t *testing.T) {
+	sess := newFakeSession()
+	w, reg := newTestWorker(t, sess)
+	job := NewDownloadJob("!x")
+	reg.Enqueue(job)
+	reg.Cancel(job.ID) // cancel while queued
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.RunDownload(ctx)
+	// job stays cancelled, never runs (fetch never called)
+	time.Sleep(50 * time.Millisecond)
+	snap, _ := reg.Get(job.ID)
+	if snap.Status != StatusCancelled {
+		t.Errorf("status = %s, want cancelled", snap.Status)
+	}
+	if len(sess.downloaded) != 0 {
+		t.Error("cancelled queued job should not be sent to IRC")
 	}
 }

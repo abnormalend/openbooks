@@ -30,6 +30,11 @@ type WorkerConfig struct {
 	SearchTimeout   time.Duration
 	DownloadTimeout time.Duration
 
+	// LibrarySubdir is the subdirectory under DownloadDir where downloaded
+	// books are stored. Empty is a valid, intended value meaning "the
+	// DownloadDir root" (not coerced to a default here).
+	LibrarySubdir string
+
 	// BrowserConnected, if set, is re-checked immediately before Connect
 	// so a browser tab that connects while a job sits in the queue still
 	// wins: the job fails fast with browser_session_active instead of
@@ -53,9 +58,13 @@ type Worker struct {
 	log     *log.Logger
 
 	// fetch downloads+extracts a DCC payload; core.DownloadExtractDCCString
+	// in production, stubbed in tests. Used for search (no per-job cancel).
+	fetch func(baseDir, dccStr string, progress io.Writer) (string, error)
+	// fetchCtx is the ctx-aware equivalent used for downloads, so a job
+	// cancel aborts an in-flight transfer. core.DownloadExtractDCCStringContext
 	// in production, stubbed in tests.
-	fetch   func(baseDir, dccStr string, progress io.Writer) (string, error)
-	tempDir string
+	fetchCtx func(ctx context.Context, baseDir, dccStr string, progress io.Writer) (string, error)
+	tempDir  string
 }
 
 func NewWorker(reg *Registry, sess sessionAPI, limiter *SearchLimiter, cfg WorkerConfig, logger *log.Logger) *Worker {
@@ -67,13 +76,14 @@ func NewWorker(reg *Registry, sess sessionAPI, limiter *SearchLimiter, cfg Worke
 	// fetch itself tries to create the file inside tempDir.
 	_ = os.MkdirAll(tempDir, 0o755)
 	return &Worker{
-		reg:     reg,
-		sess:    sess,
-		limiter: limiter,
-		cfg:     cfg,
-		log:     logger,
-		fetch:   core.DownloadExtractDCCString,
-		tempDir: tempDir,
+		reg:      reg,
+		sess:     sess,
+		limiter:  limiter,
+		cfg:      cfg,
+		log:      logger,
+		fetch:    core.DownloadExtractDCCString,
+		fetchCtx: core.DownloadExtractDCCStringContext,
+		tempDir:  tempDir,
 	}
 }
 
@@ -147,6 +157,11 @@ func drain(ch <-chan Event) {
 }
 
 func (w *Worker) doSearch(ctx context.Context, job *Job) {
+	jobCtx, jobCancel := context.WithCancel(ctx)
+	defer jobCancel()
+	w.reg.SetCancel(job.ID, jobCancel)
+	defer w.reg.ClearCancel(job.ID)
+
 	if w.cfg.BrowserConnected != nil && w.cfg.BrowserConnected() {
 		w.fail(job, "browser_session_active", nil)
 		return
@@ -155,8 +170,13 @@ func (w *Worker) doSearch(ctx context.Context, job *Job) {
 		w.fail(job, "irc_connect_failed", err)
 		return
 	}
-	if err := w.limiter.Wait(ctx); err != nil {
-		w.fail(job, "cancelled", err)
+	if err := w.limiter.Wait(jobCtx); err != nil {
+		if w.reg.WasCancelled(job.ID) {
+			w.log.Printf("search job %s: cancelled", job.ID)
+			w.reg.FinishCancelled(job)
+		} else {
+			w.fail(job, "cancelled", err)
+		}
 		return
 	}
 	// Drain right before sending, not right after Connect: a reply
@@ -191,8 +211,13 @@ func (w *Worker) doSearch(ctx context.Context, job *Job) {
 		case <-timer.C:
 			w.fail(job, "timeout", nil)
 			return
-		case <-ctx.Done():
-			w.fail(job, "cancelled", ctx.Err())
+		case <-jobCtx.Done():
+			if w.reg.WasCancelled(job.ID) {
+				w.log.Printf("search job %s: cancelled", job.ID)
+				w.reg.FinishCancelled(job)
+			} else {
+				w.fail(job, "cancelled", jobCtx.Err())
+			}
 			return
 		}
 	}
@@ -226,6 +251,11 @@ func (w *Worker) completeSearch(job *Job, dccText string) {
 }
 
 func (w *Worker) doDownload(ctx context.Context, job *Job) {
+	jobCtx, jobCancel := context.WithCancel(ctx)
+	defer jobCancel()
+	w.reg.SetCancel(job.ID, jobCancel)
+	defer w.reg.ClearCancel(job.ID)
+
 	if w.cfg.BrowserConnected != nil && w.cfg.BrowserConnected() {
 		w.fail(job, "browser_session_active", nil)
 		return
@@ -255,7 +285,7 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 		case ev := <-w.sess.DownloadEvents():
 			switch ev.Kind {
 			case EvBookResult:
-				w.completeDownload(job, ev.Text)
+				w.completeDownload(jobCtx, job, ev.Text)
 				return
 			case EvBadServer:
 				w.fail(job, "server_unavailable", nil)
@@ -292,25 +322,34 @@ func (w *Worker) doDownload(ctx context.Context, job *Job) {
 		case <-timer.C:
 			w.fail(job, "timeout", nil)
 			return
-		case <-ctx.Done():
-			w.fail(job, "cancelled", ctx.Err())
+		case <-jobCtx.Done():
+			if w.reg.WasCancelled(job.ID) {
+				w.log.Printf("download job %s: cancelled", job.ID)
+				w.reg.FinishCancelled(job)
+			} else {
+				w.fail(job, "cancelled", jobCtx.Err())
+			}
 			return
 		}
 	}
 }
 
-// completeDownload runs the DCC transfer into <DownloadDir>/books. The
-// job timeout only bounds the wait for the bot's offer; the transfer
-// itself runs to completion (or DCC error).
-func (w *Worker) completeDownload(job *Job, dccText string) {
+// completeDownload runs the DCC transfer into <DownloadDir>/<LibrarySubdir>.
+// The job timeout only bounds the wait for the bot's offer; the transfer
+// itself runs to completion, DCC error, or ctx cancellation.
+func (w *Worker) completeDownload(ctx context.Context, job *Job, dccText string) {
 	if d, err := dcc.ParseString(dccText); err == nil {
 		w.reg.Update(job, func(j *Job) { j.Size = d.Size })
 	}
 	progress := &progressWriter{fn: func(n int) {
 		w.reg.Update(job, func(j *Job) { j.Bytes += int64(n) })
 	}}
-	path, err := w.fetch(filepath.Join(w.cfg.DownloadDir, "books"), dccText, progress)
+	path, err := w.fetchCtx(ctx, filepath.Join(w.cfg.DownloadDir, w.cfg.LibrarySubdir), dccText, progress)
 	if err != nil {
+		if w.reg.WasCancelled(job.ID) {
+			w.reg.FinishCancelled(job)
+			return
+		}
 		w.fail(job, "dcc_failed", err)
 		return
 	}
