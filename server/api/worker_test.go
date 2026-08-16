@@ -179,6 +179,34 @@ func TestSearchJobConnectFailure(t *testing.T) {
 	}
 }
 
+func TestSearchJobFailsFastWhenBrowserConnected(t *testing.T) {
+	sess := newFakeSession()
+	reg := NewRegistry(3, time.Hour)
+	w := NewWorker(reg, sess, NewSearchLimiter(0), WorkerConfig{
+		DownloadDir:      t.TempDir(),
+		SearchTimeout:    200 * time.Millisecond,
+		DownloadTimeout:  200 * time.Millisecond,
+		BrowserConnected: func() bool { return true },
+	}, log.New(io.Discard, "", 0))
+	w.tempDir = t.TempDir()
+
+	job := NewSearchJob("q", 0)
+	reg.Enqueue(job)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.RunSearch(ctx)
+	waitStatus(t, reg, job, StatusError)
+	cancel()
+
+	snap, _ := reg.Get(job.ID)
+	if snap.Error == nil || snap.Error.Code != "browser_session_active" {
+		t.Errorf("error = %+v", snap.Error)
+	}
+	if len(sess.searched) != 0 {
+		t.Error("must not send a search when a browser client is connected")
+	}
+}
+
 func TestSearchJobDisconnectedMidFlight(t *testing.T) {
 	sess := newFakeSession()
 	w, reg := newTestWorker(t, sess)

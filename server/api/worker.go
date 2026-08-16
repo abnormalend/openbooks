@@ -27,6 +27,12 @@ type WorkerConfig struct {
 	DownloadDir     string
 	SearchTimeout   time.Duration
 	DownloadTimeout time.Duration
+
+	// BrowserConnected, if set, is re-checked immediately before Connect
+	// so a browser tab that connects while a job sits in the queue still
+	// wins: the job fails fast with browser_session_active instead of
+	// stealing the one IRC identity out from under the browser.
+	BrowserConnected func() bool
 }
 
 // Worker drains the registry queues, one goroutine per job type. Search
@@ -93,9 +99,10 @@ func (w *Worker) RunDownload(ctx context.Context) {
 // without an underlying error (i.e. the failure is a Worker-observed
 // condition, not something returned by a dependency).
 var failureMessages = map[string]string{
-	"timeout":            "no reply from the IRC bot within the job timeout",
-	"irc_disconnected":   "IRC connection lost",
-	"server_unavailable": "the book server rejected the request; try another server",
+	"timeout":                "no reply from the IRC bot within the job timeout",
+	"irc_disconnected":       "IRC connection lost",
+	"server_unavailable":     "the book server rejected the request; try another server",
+	"browser_session_active": "a browser websocket client connected before the job started",
 }
 
 func (w *Worker) fail(job *Job, code string, err error) {
@@ -120,6 +127,10 @@ func drain(ch <-chan Event) {
 }
 
 func (w *Worker) doSearch(ctx context.Context, job *Job) {
+	if w.cfg.BrowserConnected != nil && w.cfg.BrowserConnected() {
+		w.fail(job, "browser_session_active", nil)
+		return
+	}
 	if err := w.sess.Connect(); err != nil {
 		w.fail(job, "irc_connect_failed", err)
 		return
@@ -192,6 +203,10 @@ func (w *Worker) completeSearch(job *Job, dccText string) {
 }
 
 func (w *Worker) doDownload(ctx context.Context, job *Job) {
+	if w.cfg.BrowserConnected != nil && w.cfg.BrowserConnected() {
+		w.fail(job, "browser_session_active", nil)
+		return
+	}
 	if err := w.sess.Connect(); err != nil {
 		w.fail(job, "irc_connect_failed", err)
 		return

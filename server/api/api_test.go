@@ -14,9 +14,14 @@ import (
 	"github.com/evan-buss/openbooks/core"
 )
 
-func newTestAPI(t *testing.T, browser bool) *API {
+// newTestAPIWithFlag returns an API whose BrowserConnected hook reads the
+// returned pointer, so a test can flip "browser connected" on partway
+// through (e.g. to check that it beats other admission checks like
+// queue_full) without rebuilding the API and losing queued jobs.
+func newTestAPIWithFlag(t *testing.T, browser bool) (*API, *bool) {
 	t.Helper()
-	return New(Config{
+	flag := browser
+	a := New(Config{
 		Token:       "tok",
 		Version:     "9.9.9",
 		BasePath:    "/openbooks/",
@@ -26,10 +31,17 @@ func newTestAPI(t *testing.T, browser bool) *API {
 		Session:     SessionConfig{Nick: "n", Server: "127.0.0.1:1"},
 	}, Deps{
 		Limiter:          NewSearchLimiter(10 * time.Second),
-		BrowserConnected: func() bool { return browser },
+		BrowserConnected: func() bool { return flag },
 		Servers:          func() core.IrcServers { return core.IrcServers{ElevatedUsers: []string{"DV8"}} },
 		Log:              log.New(io.Discard, "", 0),
 	})
+	return a, &flag
+}
+
+func newTestAPI(t *testing.T, browser bool) *API {
+	t.Helper()
+	a, _ := newTestAPIWithFlag(t, browser)
+	return a
 }
 
 func call(t *testing.T, a *API, method, path, body, token string) (*httptest.ResponseRecorder, map[string]interface{}) {
@@ -216,5 +228,43 @@ func TestYield(t *testing.T) {
 	call(t, a, "POST", "/search", `{"query":"a"}`, "tok")
 	if a.Yield() {
 		t.Error("Yield with a queued job should refuse")
+	}
+}
+
+func TestMethodNotAllowedIsBehindAuth(t *testing.T) {
+	a := newTestAPI(t, false)
+	// No token: auth must run before method-not-allowed is decided.
+	rec, _ := call(t, a, "PUT", "/search", "", "")
+	if rec.Code != 401 {
+		t.Errorf("PUT /search without token = %d, want 401", rec.Code)
+	}
+	// Right token: now it's a real 405, in our JSON error shape.
+	rec, m := call(t, a, "PUT", "/search", "", "tok")
+	if rec.Code != 405 || m["code"] != "method_not_allowed" {
+		t.Errorf("PUT /search with token = %d %v, want 405 method_not_allowed", rec.Code, m)
+	}
+	// Unmatched route: JSON 404, not chi's plain-text default.
+	rec, m = call(t, a, "GET", "/nope", "", "")
+	if rec.Code != 404 || m["code"] != "not_found" {
+		t.Errorf("GET /nope = %d %v, want 404 not_found", rec.Code, m)
+	}
+}
+
+func TestPostSearchRejectsUnknownFields(t *testing.T) {
+	a := newTestAPI(t, false)
+	rec, m := call(t, a, "POST", "/search", `{"query":"a","foo":1}`, "tok")
+	if rec.Code != 400 || m["code"] != "bad_request" {
+		t.Errorf("= %d %v, want 400 bad_request", rec.Code, m)
+	}
+}
+
+func TestBrowserActiveBeatsQueueFull(t *testing.T) {
+	a, browser := newTestAPIWithFlag(t, false) // depth 2
+	call(t, a, "POST", "/search", `{"query":"a"}`, "tok")
+	call(t, a, "POST", "/search", `{"query":"b"}`, "tok")
+	*browser = true
+	rec, m := call(t, a, "POST", "/search", `{"query":"c"}`, "tok")
+	if rec.Code != 409 || m["code"] != "browser_session_active" {
+		t.Errorf("= %d %v, want 409 browser_session_active (not queue_full)", rec.Code, m)
 	}
 }

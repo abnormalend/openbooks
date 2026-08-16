@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/evan-buss/openbooks/core"
@@ -51,6 +52,7 @@ type API struct {
 	sess    *Session
 	worker  *Worker
 	started time.Time
+	once    sync.Once
 }
 
 func New(cfg Config, deps Deps) *API {
@@ -81,24 +83,29 @@ func New(cfg Config, deps Deps) *API {
 	reg := NewRegistry(cfg.QueueDepth, cfg.JobTTL)
 	sess := NewSession(cfg.Session, deps.Log, deps.OnServerList)
 	worker := NewWorker(reg, sess, deps.Limiter, WorkerConfig{
-		DownloadDir:     cfg.DownloadDir,
-		SearchTimeout:   cfg.SearchTimeout,
-		DownloadTimeout: cfg.DownloadTimeout,
+		DownloadDir:      cfg.DownloadDir,
+		SearchTimeout:    cfg.SearchTimeout,
+		DownloadTimeout:  cfg.DownloadTimeout,
+		BrowserConnected: deps.BrowserConnected,
 	}, deps.Log)
 	return &API{cfg: cfg, deps: deps, reg: reg, sess: sess, worker: worker, started: time.Now()}
 }
 
 // Start launches the workers, the TTL sweeper and the idle watcher.
-// Nothing connects to IRC until the first job arrives.
+// Nothing connects to IRC until the first job arrives. A second call is
+// a no-op: the server only ever calls this once, but guarding it means
+// a mistaken extra call can't double up the background loops.
 func (a *API) Start(ctx context.Context) {
-	go a.worker.RunSearch(ctx)
-	go a.worker.RunDownload(ctx)
-	go a.loop(ctx, time.Minute, a.reg.Sweep)
-	go a.loop(ctx, 15*time.Second, a.idleCheck)
-	go func() {
-		<-ctx.Done()
-		a.sess.Disconnect()
-	}()
+	a.once.Do(func() {
+		go a.worker.RunSearch(ctx)
+		go a.worker.RunDownload(ctx)
+		go a.loop(ctx, time.Minute, a.reg.Sweep)
+		go a.loop(ctx, 15*time.Second, a.idleCheck)
+		go func() {
+			<-ctx.Done()
+			a.sess.Disconnect()
+		}()
+	})
 }
 
 func (a *API) loop(ctx context.Context, every time.Duration, fn func()) {
@@ -115,6 +122,10 @@ func (a *API) loop(ctx context.Context, every time.Duration, fn func()) {
 }
 
 func (a *API) idleCheck() {
+	// LastFinished's zero value means "connected but never finished a
+	// job" — by definition idle, since nothing is running or queued
+	// (Busy would be true otherwise) and no job's completion has ever
+	// reset the timer. Disconnecting in that case is correct.
 	if a.sess.Connected() && !a.reg.Busy() && time.Since(a.reg.LastFinished()) > a.cfg.IdleTimeout {
 		a.deps.Log.Println("API session idle, disconnecting from IRC")
 		a.sess.Disconnect()
@@ -135,6 +146,16 @@ func (a *API) Yield() bool {
 // Router returns the chi router to mount under <BASE_PATH>api.
 func (a *API) Router() chi.Router {
 	r := chi.NewRouter()
+	// chi's default 405/404 handling runs outside any route's middleware
+	// chain, so without these every non-2xx response from unmatched
+	// methods/paths would fall back to chi's plain-text default instead
+	// of our JSON error shape — and a bare 405 would let an
+	// unauthenticated client learn a route exists before auth ever runs.
+	// Wrapping the 405 handler in RequireToken keeps auth first.
+	r.MethodNotAllowed(RequireToken(a.cfg.Token)(http.HandlerFunc(methodNotAllowed)).ServeHTTP)
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, "not_found", "no such route")
+	})
 	r.Get("/health", a.health)
 	r.Get("/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/yaml")
@@ -144,14 +165,8 @@ func (a *API) Router() chi.Router {
 		p.Use(RequireToken(a.cfg.Token))
 		p.Post("/search", a.postSearch)
 		p.Get("/search/{id}", a.getJob(JobSearch))
-		// GET /search has no meaning (POST-only), but chi's default
-		// 405 handling bypasses group middleware entirely, which would
-		// let an unauthenticated client learn the route exists. Register
-		// it explicitly so RequireToken still runs first.
-		p.Get("/search", methodNotAllowed)
 		p.Post("/download", a.postDownload)
 		p.Get("/download/{id}", a.getJob(JobDownload))
-		p.Get("/download", methodNotAllowed)
 		p.Get("/jobs", a.listJobs)
 		p.Get("/servers", a.servers)
 	})
@@ -178,10 +193,8 @@ func (a *API) health(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func decode(r *http.Request, v interface{}) error {
-	if r.Body == nil {
-		return errors.New("empty body")
-	}
+func decode(w http.ResponseWriter, r *http.Request, v interface{}) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
@@ -212,7 +225,7 @@ func (a *API) postSearch(w http.ResponseWriter, r *http.Request) {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
 	}
-	if err := decode(r, &body); err != nil {
+	if err := decode(w, r, &body); err != nil {
 		writeError(w, 400, "bad_request", "invalid JSON body: "+err.Error())
 		return
 	}
@@ -232,7 +245,7 @@ func (a *API) postDownload(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Book string `json:"book"`
 	}
-	if err := decode(r, &body); err != nil {
+	if err := decode(w, r, &body); err != nil {
 		writeError(w, 400, "bad_request", "invalid JSON body: "+err.Error())
 		return
 	}

@@ -167,7 +167,7 @@ components:
             properties:
               jobId: { type: string, format: uuid }
               status: { type: string, enum: [queued] }
-              position: { type: integer, description: 1-based position in the queue }
+              position: { type: integer, description: 1-based position in the queue, excluding the currently running job }
     BadRequest:
       description: Malformed body or parameters (`bad_request`)
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -222,7 +222,7 @@ components:
           description: |
             Set when status is `error`. Codes: `timeout`, `server_unavailable`,
             `irc_connect_failed`, `irc_disconnected`, `dcc_failed`,
-            `parse_failed`, `cancelled`.
+            `parse_failed`, `cancelled`, `browser_session_active`.
     SearchJob:
       allOf:
         - $ref: "#/components/schemas/JobBase"
