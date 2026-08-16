@@ -84,10 +84,18 @@ func isUserRelevant(text, nick string) bool {
 	return strings.EqualFold(target, nick)
 }
 
-// searchResultHandler downloads from DCC server, parses data, and sends data to client
+// searchResultHandler downloads from DCC server, parses data, and sends data to client.
+//
+// Search-results zips are ephemeral - they exist only long enough to be
+// parsed into the BookDetail array sent over the websocket, then deleted.
+// They have no business living in the user-visible /books directory or
+// any --persist'd bind mount. Routing them through os.TempDir() keeps
+// them on local fast storage (typically tmpfs), avoids touching the
+// possibly-network-backed mount, and means a missing or unwritable
+// download directory can't break search.
 func (c *Client) searchResultHandler(downloadDir string) core.HandlerFunc {
 	return func(text string) {
-		extractedPath, err := core.DownloadExtractDCCString(filepath.Join(downloadDir, "books"), text, nil)
+		extractedPath, err := core.DownloadExtractDCCString(os.TempDir(), text, nil)
 		if err != nil {
 			c.log.Println(err)
 			c.send <- newErrorResponse("Error when downloading search results.")
@@ -130,7 +138,9 @@ func (c *Client) bookResultHandler(downloadDir string, disableBrowserDownloads b
 		extractedPath, err := core.DownloadExtractDCCString(filepath.Join(downloadDir, "books"), text, nil)
 		if err != nil {
 			c.log.Println(err)
-			c.send <- newErrorResponse("Error when downloading book.")
+			// MessageType.DOWNLOAD (not STATUS) so the frontend clears
+			// the spinning Download button alongside surfacing the error.
+			c.send <- newDownloadFailureResponse(err.Error())
 			return
 		}
 
@@ -146,7 +156,10 @@ func (c *Client) noResultsHandler(_ string) {
 
 // BadServer is called when the requested download fails because the server is not available
 func (c *Client) badServerHandler(_ string) {
-	c.send <- newErrorResponse("Server is not available. Try another one.")
+	// MessageType.DOWNLOAD so the frontend pops the in-flight book off
+	// the spinner queue (the bot rejected the request - the download is
+	// not coming).
+	c.send <- newDownloadFailureResponse("Server is not available. Try another one.")
 }
 
 // SearchAccepted is called when the user's query is accepted into the search queue

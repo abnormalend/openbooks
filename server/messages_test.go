@@ -78,6 +78,24 @@ func TestNewDownloadResponseDisableBrowserMode(t *testing.T) {
 	}
 }
 
+func TestNewDownloadFailureResponseClearsSpinner(t *testing.T) {
+	r := newDownloadFailureResponse("download size didn't match dcc file size")
+	// MessageType.DOWNLOAD is the contract that makes the frontend's
+	// socketMiddleware call removeInFlightDownload. STATUS would not.
+	if r.MessageType != DOWNLOAD {
+		t.Errorf("MessageType = %v, want DOWNLOAD (so the spinner clears)", r.MessageType)
+	}
+	if r.NotificationType != DANGER {
+		t.Errorf("NotificationType = %v, want DANGER", r.NotificationType)
+	}
+	if r.DownloadPath != "" {
+		t.Errorf("DownloadPath = %q, want empty (no autodownload on failure)", r.DownloadPath)
+	}
+	if !strings.Contains(r.Detail, "download size") {
+		t.Errorf("Detail = %q, want underlying error embedded", r.Detail)
+	}
+}
+
 func TestNewStatusAndErrorResponses(t *testing.T) {
 	s := newStatusResponse(SUCCESS, "ok")
 	if s.MessageType != STATUS || s.NotificationType != SUCCESS || s.Title != "ok" {

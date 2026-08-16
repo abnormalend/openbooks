@@ -16,6 +16,15 @@ func DownloadExtractDCCString(baseDir, dccStr string, progress io.Writer) (strin
 		return "", err
 	}
 
+	// Self-heal: ensure baseDir exists. Callers historically rely on
+	// server.createBooksDirectory having fired at startup, but that's
+	// fragile - if the directory is missing for any reason (volume swap,
+	// non-default --dir without that dir pre-existing, manual delete),
+	// the book download otherwise fails with a confusing ENOENT.
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return "", err
+	}
+
 	dccPath := filepath.Join(baseDir, download.Filename+".temp")
 	file, err := os.Create(dccPath)
 	if err != nil {
